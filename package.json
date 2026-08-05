@@ -1,0 +1,26 @@
+{
+  "name": "takoda99-config",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Takoda99 の GameParameters とお題(words)を編集する運営UI（Takoda99-Server の /api/params, /api/words を叩く薄いフロント）",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "^15.5.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "autoprefixer": "^10.4.21",
+    "postcss": "^8.5.3",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.8.3"
+  }
+}

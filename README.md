@@ -18,9 +18,30 @@ Takoda99（たこ焼き経営バトルロイヤル）の **運営用 管理UI**�
 
 本リポの TS 型は `params.go` の**手動ミラー**。サーバー側で項目が増減したら両方を揃える。
 
-## 状態
+## 使い方（ローカル）
 
-**設計フェーズ**。スキャフォールドは issue #1 から。
+```bash
+npm install
+cp .env.example .env.local   # 接続先を変える場合
+npm run dev                  # http://localhost:3000
+```
+
+画面右上に管理トークン（サーバーの `CONFIG_ADMIN_TOKEN`）を入れると保存できる。閲覧だけならトークンは不要。
+
+| 変数 | 意味 |
+|---|---|
+| `NEXT_PUBLIC_GAME_SERVER_URL` | ゲームサーバーのベースURL（既定 `https://takoda99.mooo.com`） |
+
+## 画面
+
+- **パラメータ** — `GameParameters` 全56項目を12グループで編集。全項目に説明文つき。検索・差分表示・プリセット・変更履歴・JSONプレビュー。
+- **お題（words）** — 語の追加・編集・削除、CSV/TSV一括入力、レベル分布の確認。
+
+## デプロイ（Vercel）
+
+1. 本リポを Import（Framework: Next.js 自動検出）
+2. `NEXT_PUBLIC_GAME_SERVER_URL` を設定
+3. **払い出された URL をサーバーの `CONFIG_FRONT_ORIGIN` に追加**（忘れると CORS で全機能が落ちる）
 
 ## 前作との違い（Textro99 `config-front` からの変更点）
 
