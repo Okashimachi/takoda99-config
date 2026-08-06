@@ -4,7 +4,7 @@
 import type { GameParameters } from "./params";
 
 export const SERVER_BASE = (
-  process.env.NEXT_PUBLIC_GAME_SERVER_URL ?? "https://takoda99.mooo.com"
+  process.env.NEXT_PUBLIC_GAME_SERVER_URL ?? "http://localhost:8080"
 ).replace(/\/+$/, "");
 
 export type WordEntry = {
