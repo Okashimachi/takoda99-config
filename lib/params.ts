@@ -78,7 +78,7 @@ export const defaultParameters: GameParameters = {
   session: { tickIntervalMs: 150, publishIntervalMs: 250 },
   matching: { minPlayers: 20, maxPlayers: 99, startCountdownMs: 15000, minFill: 99 },
   credit: {
-    initialLife: 20,
+    initialLife: 3,
     leaveLoss: { normal: 1, bonus: 1, claimer: 1, buzz: 2 },
   },
   customer: {
