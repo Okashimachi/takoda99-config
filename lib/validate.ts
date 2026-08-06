@@ -182,9 +182,9 @@ export function riskWarnings(p: GameParameters, maxWordLevel = MAX_WORD_LEVEL): 
   if (n("patience.lateMul") > 0 && n("patience.lateMul") < 0.3) {
     w.push(`終盤の短縮倍率 ${n("patience.lateMul")} は客がかなり早く帰ります（理不尽になりがち）`);
   }
-  if (n("credit.initialLife") <= 3) {
+  if (n("credit.initialLife") <= 2) {
     w.push(
-      `初期ライフ ${n("credit.initialLife")} は少なく、試合が非常に短くなる可能性があります（既定は 20）`,
+      `初期ライフ ${n("credit.initialLife")} は少なく、試合が非常に短くなる可能性があります（既定は 3）`,
     );
   }
 
