@@ -19,6 +19,8 @@ export type GameParameters = {
     minPlayers: number;
     maxPlayers: number;
     startCountdownMs: number;
+    rosterWaitMs: number;
+    readyCountdownMs: number;
     minFill: number;
   };
   credit: {
@@ -76,7 +78,7 @@ export type GameParameters = {
 // 2026-08-05 時点。PR #80（決着時間調整・#74）と PR #79（heat.maxLevel 適用・#75）の反映後。
 export const defaultParameters: GameParameters = {
   session: { tickIntervalMs: 150, publishIntervalMs: 250 },
-  matching: { minPlayers: 20, maxPlayers: 99, startCountdownMs: 15000, minFill: 99 },
+  matching: { minPlayers: 20, maxPlayers: 99, startCountdownMs: 15000, rosterWaitMs: 3000, readyCountdownMs: 5000, minFill: 99 },
   credit: {
     initialLife: 3,
     leaveLoss: { normal: 1, bonus: 1, claimer: 1, buzz: 2 },
@@ -281,7 +283,19 @@ export const schema: GroupSpec[] = [
         path: "matching.startCountdownMs",
         label: "開始カウントダウン",
         unit: "ms",
-        help: "開始最小人数に達してから試合が始まるまでの待ち時間。長いほど後から来た人が滑り込める。",
+        help: "開始最小人数に達してからマッチング完了（メンバー確定）するまでのカウントダウン時間。",
+      },
+      {
+        path: "matching.rosterWaitMs",
+        label: "メンバー確定〜画面遷移猶予",
+        unit: "ms",
+        help: "マッチング完了後に最終メンバー一覧を見せる時間。この時間経過後に試合画面へ遷移する。",
+      },
+      {
+        path: "matching.readyCountdownMs",
+        label: "試合開始前カウントダウン",
+        unit: "ms",
+        help: "試合画面に遷移してから、実際にタイピング（ゲーム進行）が解禁されるまでの猶予時間。",
       },
       {
         path: "matching.minFill",
