@@ -3,10 +3,14 @@
 //   validate()     … 破綻値。保存ボタンを無効化する（サーバーの Validate() を先回りする）
 //   riskWarnings() … 妥当だが事故りやすい値。保存前に確認ダイアログで列挙する
 //
-// validate はサーバー game.GameParameters.Validate() の9条件を必ず含む。
+// validate はサーバー game.GameParameters.Validate() の条件を必ず含む。
 // サーバーで弾かれてから気づくのを防ぐのが目的。
+//
+// ⚠ **サーバーが最終防衛線。** ここは UX のための先出し検証であって、
+// サーバー側の検証を省く理由にはしない（plan-h24 §4.4）。
 
 import {
+  CULL_STAGE_COUNT,
   MAX_WORD_LEVEL,
   allFieldPaths,
   allFieldSpecs,
@@ -43,9 +47,6 @@ export function validate(p: GameParameters): Issue[] {
   if (n("customer.total") <= 0) {
     errs.push({ path: "customer.total", message: "客の総数は 1 以上である必要があります" });
   }
-  if (n("credit.initialLife") <= 0) {
-    errs.push({ path: "credit.initialLife", message: "初期ライフは 1 以上である必要があります" });
-  }
   if (n("session.tickIntervalMs") <= 0) {
     errs.push({ path: "session.tickIntervalMs", message: "tick 周期は 1 以上である必要があります" });
   }
@@ -58,10 +59,27 @@ export function validate(p: GameParameters): Issue[] {
   if (n("heat.maxLevel") <= 0) {
     errs.push({ path: "heat.maxLevel", message: "火力の上限は 1 以上である必要があります" });
   }
-  if (n("storm.thresholdPct") < 0 || n("storm.thresholdPct") > 1) {
-    errs.push({ path: "storm.thresholdPct", message: "淘汰する割合は 0〜1 の範囲である必要があります" });
+  if (n("score.weightTakoyaki") <= 0) {
+    errs.push({
+      path: "score.weightTakoyaki",
+      message: "たこ焼き1個の加点は 1 以上である必要があります（0 だと点が入らず順位が付きません）",
+    });
   }
-  // storm.intervalTicks >= 0 / phase.midAliveThreshold >= 0 は上の共通チェックが担う。
+  // score.weightMiss は 0 を許す（ミスを罰しない設定でバランスを見たい場合がある）。
+  // 負値は上の共通チェックが弾く。
+  for (const key of [
+    "publish.evaluationIntervalMs",
+    "publish.warningIntervalMs",
+    "publish.rankingIntervalMs",
+    "publish.rankingDeltaIntervalMs",
+  ]) {
+    if (n(key) <= 0) {
+      errs.push({ path: key, message: "配信間隔は 1 以上である必要があります（0 だと毎tick配信になり帯域が破綻します）" });
+    }
+  }
+
+  // --- 足切りスケジュール（サーバー CullParams.validate と同一条件）-----------
+  errs.push(...validateCull(p));
 
   // --- フロント独自の整合性チェック ---------------------------------------
   if (n("matching.minPlayers") > n("matching.maxPlayers")) {
@@ -80,12 +98,6 @@ export function validate(p: GameParameters): Issue[] {
     errs.push({
       path: "phase.midTimeMs",
       message: "中盤へ移行する時間は終盤より前にしてください",
-    });
-  }
-  if (n("storm.warnTicks") > n("storm.intervalTicks")) {
-    errs.push({
-      path: "storm.warnTicks",
-      message: "予告の先出しは淘汰の間隔以下にしてください（超えると予告が出ません）",
     });
   }
   const weightSum =
@@ -107,13 +119,62 @@ export function validate(p: GameParameters): Issue[] {
       message: "最終盤演出のしきい値は終盤演出以下にしてください",
     });
   }
-  if (n("patience.lateMul") <= 0) {
+  return errs;
+}
+
+/**
+ * validateCull は足切りスケジュールを検証する。サーバー CullParams.validate と同一条件。
+ *
+ * 🔴 **ゼロ埋めの罠がここの存在理由。** サーバーは [6]CullStage の固定長配列で受けるので、
+ * 要素が足りない JSON を送ると Go 側が残りをゼロ値で埋め、
+ * 「0秒時点で生存0＝開始直後に全店即死」が成立してしまう。
+ */
+function validateCull(p: GameParameters): Issue[] {
+  const errs: Issue[] = [];
+  const stages = p.cull?.stages;
+  if (!Array.isArray(stages) || stages.length !== CULL_STAGE_COUNT) {
     errs.push({
-      path: "patience.lateMul",
-      message: "終盤の短縮倍率は 0 より大きくしてください（0 だと短縮が無効になります）",
+      path: "cull.stages.0.targetAliveCount",
+      message: `足切りは ${CULL_STAGE_COUNT} 段階ちょうどである必要があります（現在 ${Array.isArray(stages) ? stages.length : 0} 段階）`,
     });
+    return errs;
   }
 
+  let prevAt = 0;
+  let prevTarget = -1;
+  stages.forEach((st, i) => {
+    const path = `cull.stages.${i}.targetAliveCount`;
+    const at = Number(st?.atMs);
+    const target = Number(st?.targetAliveCount);
+    const last = i === stages.length - 1;
+
+    if (!Number.isFinite(at) || at <= 0) {
+      errs.push({ path, message: `第${i + 1}段階: 時刻が不正です（${at}）` });
+    } else if (at <= prevAt) {
+      errs.push({ path, message: `第${i + 1}段階: 時刻が前の段階より後である必要があります` });
+    }
+    if (!Number.isFinite(target) || target < 0 || !Number.isInteger(target)) {
+      errs.push({ path, message: `第${i + 1}段階: 目標生存数は 0 以上の整数にしてください` });
+    } else if (prevTarget >= 0 && target > prevTarget) {
+      errs.push({
+        path,
+        message: `第${i + 1}段階: 目標生存数は前の段階(${prevTarget})以下にしてください（生存数は増えません）`,
+      });
+    } else if (last && target !== 0) {
+      errs.push({
+        path,
+        message: `最終段階の目標生存数は 0 である必要があります（120秒で全店が脱落して試合が終わります）`,
+      });
+    } else if (!last && target <= 0) {
+      errs.push({
+        path,
+        message: `第${i + 1}段階: 目標生存数は 1 以上にしてください（最終段階より前に生存0にすると試合が途中で終わります）`,
+      });
+    }
+
+    if (Number.isFinite(at)) prevAt = at;
+    if (Number.isFinite(target)) prevTarget = target;
+  });
   return errs;
 }
 
@@ -125,16 +186,36 @@ export function riskWarnings(p: GameParameters, maxWordLevel = MAX_WORD_LEVEL): 
   const w: string[] = [];
   const n = (path: string) => getNumber(p, path);
 
-  // 決着不能はこの画面で防げる最悪の事故。Takoda99 に制限時間はない。
-  if (n("storm.intervalTicks") === 0) {
-    w.push(
-      "下位淘汰の間隔が 0＝淘汰が無効です。この試合には制限時間がないため、決着しなくなる可能性があります",
-    );
+  // ★本作の性格を決める値。極端にすると「片方の打ち方だけが正解」になる。
+  const wt = n("score.weightTakoyaki");
+  const wm = n("score.weightMiss");
+  if (Number.isFinite(wt) && Number.isFinite(wm) && wt > 0) {
+    const ratio = wm / wt;
+    if (ratio < 0.18) {
+      w.push(
+        `ミス減点がたこ焼き加点の ${(ratio * 100).toFixed(0)}% と軽く、「ミスを恐れず速く打つ」一辺倒になります（既定は25%。シミュレーションでは18%で正確に打つ人が下位3分の1に沈みました）`,
+      );
+    }
+    if (ratio > 0.4) {
+      w.push(
+        `ミス減点がたこ焼き加点の ${(ratio * 100).toFixed(0)}% と重く、速く打つ意味が薄くなります（既定は25%）`,
+      );
+    }
   }
-  if (n("storm.thresholdPct") === 0) {
-    w.push(
-      "淘汰する割合が 0 です。下位淘汰が誰も脱落させないため、決着が信用切れ（自滅）頼みになります",
-    );
+
+  // 中間段階を大きく動かすと脱落カーブの体感が変わる。
+  const stages = p.cull?.stages ?? [];
+  if (stages.length === CULL_STAGE_COUNT) {
+    if (stages[0]?.targetAliveCount !== 75) {
+      w.push(
+        `第1段階の目標生存数が ${stages[0]?.targetAliveCount} です（既定75）。ここを下げると20秒時点で切られる人が増えます`,
+      );
+    }
+    if (stages[4]?.targetAliveCount !== 10) {
+      w.push(
+        `第5段階の目標生存数が ${stages[4]?.targetAliveCount} です。**決勝の人数**なので企画で10に確定しています`,
+      );
+    }
   }
 
   if (n("matching.minPlayers") < 3 && n("matching.minFill") === 0) {
@@ -161,11 +242,6 @@ export function riskWarnings(p: GameParameters, maxWordLevel = MAX_WORD_LEVEL): 
     );
   }
 
-  const wsum = n("eval.weightAccuracy") + n("eval.weightSpeed");
-  if (Math.abs(wsum - 1) > 0.2) {
-    w.push(`精度と速度の重みの合計が ${wsum.toFixed(2)} です（1.0 を目安にしてください）`);
-  }
-
   if (n("bot.baseAccuracy") > 0.95 || n("bot.baseElapsedMs") < 1000) {
     w.push("Bot が人間より強い設定です（精度が高すぎる、または1お題が速すぎる）");
   }
@@ -174,17 +250,19 @@ export function riskWarnings(p: GameParameters, maxWordLevel = MAX_WORD_LEVEL): 
       `tick 周期が ${n("session.tickIntervalMs")}ms と短く、本番サーバー（e2-micro / 0.25vCPU）には重い可能性があります`,
     );
   }
-  if (n("session.publishIntervalMs") < 150) {
+  if (n("publish.rankingIntervalMs") < 500) {
     w.push(
-      `盤面配信間隔が ${n("session.publishIntervalMs")}ms と短く、通信量が大きく増えます（実測で1試合あたり数百MB）`,
+      `全店ランキングの配信間隔が ${n("publish.rankingIntervalMs")}ms と短く、通信量が大きく増えます（1Hzで99台合計 約4.8Mbps・1試合71MB が目安）`,
     );
   }
-  if (n("patience.lateMul") > 0 && n("patience.lateMul") < 0.3) {
-    w.push(`終盤の短縮倍率 ${n("patience.lateMul")} は客がかなり早く帰ります（理不尽になりがち）`);
-  }
-  if (n("credit.initialLife") <= 2) {
+  if (n("publish.evaluationIntervalMs") > 500) {
     w.push(
-      `初期ライフ ${n("credit.initialLife")} は少なく、試合が非常に短くなる可能性があります（既定は 3）`,
+      `自分のスコア・順位の配信が ${n("publish.evaluationIntervalMs")}ms 間隔と遅く、順位表示がもたつきます（2〜4Hz＝250〜500ms が目安）`,
+    );
+  }
+  if (n("heat.phaseLate") < 9) {
+    w.push(
+      `終盤の火力加算が ${n("heat.phaseLate")} です。9 未満だと決勝(生存10店)でお題辞書の最上位レベルに届かず、用意した語彙が使われません`,
     );
   }
 

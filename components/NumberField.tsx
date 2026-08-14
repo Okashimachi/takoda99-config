@@ -83,3 +83,49 @@ export function NumberField({
     </div>
   );
 }
+
+/**
+ * BoolField は真偽値のトグル。publish.rankingDeltaEnabled 用。
+ *
+ * NumberField は単一の数値しか扱えないので別コンポーネントにしてある。
+ */
+export function BoolField({
+  label,
+  help,
+  value,
+  changed,
+  showHelp,
+  onChange,
+}: {
+  label: string;
+  help: string;
+  value: boolean;
+  changed: boolean;
+  showHelp: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <div className="min-w-0">
+      <label className="flex cursor-pointer items-center gap-2">
+        <input
+          type="checkbox"
+          checked={value}
+          onChange={(e) => onChange(e.target.checked)}
+          className="h-4 w-4 rounded border-stone-300 text-amber-600 focus:ring-amber-200 dark:border-stone-600"
+        />
+        <span className="text-[13px] font-medium text-stone-700 dark:text-stone-200">{label}</span>
+        {changed ? (
+          <span className="text-amber-500" title="未保存の変更">
+            ●
+          </span>
+        ) : null}
+        <span className="font-mono text-[11px] text-stone-500 dark:text-stone-400">
+          {value ? "ON" : "OFF"}
+        </span>
+      </label>
+      {showHelp ? (
+        <p className="mt-1 text-[11px] leading-relaxed text-stone-500 dark:text-stone-400">{help}</p>
+      ) : null}
+    </div>
+  );
+}
