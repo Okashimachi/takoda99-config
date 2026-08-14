@@ -2,19 +2,22 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Banner, type Msg } from "@/components/Banner";
-import { NumberField } from "@/components/NumberField";
+import { BoolField, NumberField } from "@/components/NumberField";
 import { useToken } from "@/components/Chrome";
 import { ApiError, getParams, getWords, saveParams } from "@/lib/api";
 import {
   MAX_WORD_LEVEL,
   TIMING_LABEL,
+  allBoolPaths,
   allFieldPaths,
   allFieldSpecs,
   applyEdits,
   defaultParameters,
   fillMissing,
   getNumber,
+  getPath,
   schema,
+  type EditValue,
   type FieldSpec,
   type GameParameters,
   type GroupSpec,
@@ -36,7 +39,7 @@ export default function ParamsPage() {
   // サーバーから取った生JSON。保存時はこれを土台にするので、型を付けずに持つ
   // （customer.*.attribute の文字列やサーバー独自の未知フィールドを落とさないため）。
   const [serverRaw, setServerRaw] = useState<unknown>(null);
-  const [edits, setEdits] = useState<Map<string, number>>(new Map());
+  const [edits, setEdits] = useState<Map<string, EditValue>>(new Map());
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<Msg>(null);
@@ -60,11 +63,20 @@ export default function ParamsPage() {
 
   const specs = useMemo(() => allFieldSpecs(), []);
   const diffs = useMemo(() => {
-    const out: { path: string; label: string; from: number; to: number }[] = [];
+    const out: { path: string; label: string; from: number | boolean; to: number | boolean }[] = [];
     for (const path of allFieldPaths()) {
       const from = getNumber(serverParams, path);
       const to = getNumber(current, path);
       if (from !== to && !(Number.isNaN(from) && Number.isNaN(to))) {
+        out.push({ path, label: specs.get(path)?.label ?? path, from, to });
+      }
+    }
+    // 真偽値（publish.rankingDeltaEnabled）も差分に載せる。載せないと
+    // トグルを切り替えても「未保存の変更」に出ず、保存ボタンが有効にならない。
+    for (const path of allBoolPaths()) {
+      const from = getPath(serverParams, path) === true;
+      const to = getPath(current, path) === true;
+      if (from !== to) {
         out.push({ path, label: specs.get(path)?.label ?? path, from, to });
       }
     }
@@ -107,7 +119,7 @@ export default function ParamsPage() {
       .catch(() => {});
   }, [load]);
 
-  function setField(path: string, value: number) {
+  function setField(path: string, value: EditValue) {
     setEdits((prev) => {
       const next = new Map(prev);
       next.set(path, value);
@@ -117,10 +129,13 @@ export default function ParamsPage() {
 
   /** loadInto は「別の値一式」を編集中の状態として読み込む（プリセット・履歴・既定に戻す）。 */
   function loadInto(p: GameParameters, note: string) {
-    const next = new Map<string, number>();
+    const next = new Map<string, EditValue>();
     for (const path of allFieldPaths()) {
       const v = getNumber(p, path);
       if (Number.isFinite(v)) next.set(path, v);
+    }
+    for (const path of allBoolPaths()) {
+      next.set(path, getPath(p, path) === true);
     }
     setEdits(next);
     setMsg({ type: "info", text: `${note}。まだ保存していません（反映するには「保存」）` });
@@ -237,7 +252,7 @@ export default function ParamsPage() {
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="項目を検索（例: 人数 / Bot / storm / 我慢）"
+              placeholder="項目を検索（例: スコア / 足切り / 人数 / Bot）"
               className="w-full rounded-lg border border-stone-300 bg-white py-2 pl-9 pr-3 text-sm outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-200 dark:border-stone-700 dark:bg-stone-900 dark:focus:ring-amber-900"
             />
           </div>
@@ -255,9 +270,21 @@ export default function ParamsPage() {
                 {/* 直下のフィールド */}
                 {g.fields && g.fields.filter(matches).length > 0 ? (
                   <div className="grid gap-x-5 gap-y-4 sm:grid-cols-2 xl:grid-cols-3">
-                    {g.fields.filter(matches).map((f) => (
-                      <NumberField key={f.path} {...fieldProps(f)} />
-                    ))}
+                    {g.fields.filter(matches).map((f) =>
+                      f.bool ? (
+                        <BoolField
+                          key={f.path}
+                          label={f.label}
+                          help={f.help}
+                          showHelp={showHelp}
+                          changed={changedPaths.has(f.path)}
+                          value={getPath(current, f.path) === true}
+                          onChange={(v) => setField(f.path, v)}
+                        />
+                      ) : (
+                        <NumberField key={f.path} {...fieldProps(f)} />
+                      ),
+                    )}
                   </div>
                 ) : null}
 
@@ -305,6 +332,18 @@ export default function ParamsPage() {
                                 const changed = changedPaths.has(path);
                                 const invalid = errorPaths.has(path);
                                 const v = getNumber(current, path);
+                                if (c.readonly) {
+                                  return (
+                                    <td key={c.key} className="w-28 px-1.5 py-1.5">
+                                      <div
+                                        className="rounded-md border border-dashed border-stone-300 bg-stone-50 px-2 py-1.5 text-right font-mono text-[13px] text-stone-500 dark:border-stone-700 dark:bg-stone-800/50 dark:text-stone-400"
+                                        title="企画で確定した値のため変更できません"
+                                      >
+                                        {Number.isFinite(v) ? v.toLocaleString("ja-JP") : "–"}
+                                      </div>
+                                    </td>
+                                  );
+                                }
                                 return (
                                   <td key={c.key} className="w-28 px-1.5 py-1.5">
                                     <div className="flex items-center gap-1">
@@ -529,7 +568,8 @@ export default function ParamsPage() {
   );
 }
 
-function fmt(v: number): string {
+function fmt(v: number | boolean): string {
+  if (typeof v === "boolean") return v ? "ON" : "OFF";
   return Number.isFinite(v) ? String(v) : "—";
 }
 
@@ -560,9 +600,10 @@ function Intro() {
       <div className="mt-3 space-y-3 text-stone-700 dark:text-stone-300">
         <p className="text-xs leading-relaxed">
           <b>ゲームの流れ:</b>{" "}
-          客が店の行列に並ぶ → お題を打って提供する → 提供の速さと正確さで<b>評価</b>が決まる →
-          評価が高い店に客が集まる → 客に帰られると<b>信用</b>が減り、0 で脱落 →
-          さらに一定間隔で評価<b>下位が強制脱落（storm）</b> → 最後の1店が優勝。
+          客が店の行列に並ぶ → お題を打って提供する →{" "}
+          <b>スコア</b>が加算される（たこ焼き数 × 加点 − ミス数 × 減点）→{" "}
+          <b>20秒ごとにスコア下位から強制脱落</b>（99→75→55→35→20→10）→{" "}
+          <b>120秒で全店が脱落して終了</b>。その時点のスコア1位が優勝。
         </p>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[30rem] text-xs">
