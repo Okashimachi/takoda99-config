@@ -108,7 +108,12 @@ export const defaultParameters: GameParameters = {
     lateTimeMs: 90000,
   },
   // h32 で難度カーブを時間主軸に組み替えた（perElapsedSec 新設・phaseLate 9→2）。
-  heat: { base: 0, perAliveDrop: 0.03, perElapsedSec: 0.11, phaseEarly: 0, phaseMid: 1, phaseLate: 2, maxLevel: 17 },
+  //
+  // 🔴 perElapsedSec は **サーバー側の既定値（internal/game/params.go）と必ず揃える**。
+  // ここが 0.11、サーバーが 0.12 でズレていたため、DB に無いキーがこちら側の
+  // 既定値で補完されて 0.11 が保存された。0.11 だと上端(17)への到達が 119秒で
+  // **上端に居るのが1秒**しかなく、level 17 の語（約43打鍵≒10秒）が打ち切れない。
+  heat: { base: 0, perAliveDrop: 0.03, perElapsedSec: 0.12, phaseEarly: 0, phaseMid: 1, phaseLate: 2, maxLevel: 17 },
   cull: {
     stages: [
       { atMs: 20000, targetAliveCount: 75 },
