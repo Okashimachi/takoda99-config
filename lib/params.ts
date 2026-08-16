@@ -63,7 +63,9 @@ export type GameParameters = {
     phaseLate: number;
     maxLevel: number;
   };
-  cull: { stages: CullStage[] };
+  /** お題の難度を heat から独立して微調整する（plan-h35）。既定は両方 0＝現行と同じ。 */
+  odai: { levelSpread: number; levelOffset: number };
+  cull: { stages: CullStage[]; warnMaxIds: number };
   distribution: { queueRefillThreshold: number };
   presentation: {
     finalStageAliveThreshold: number;
@@ -79,9 +81,21 @@ export type GameParameters = {
 
 // server の game.DefaultParameters() と同値（フォールバック／「既定に戻す」用）。
 //
-// ⚠ **ここがズレると「既定に戻す」が嘘になる。** 2026-08-14 に
-// `go run` でサーバーの DefaultParameters() を JSON 出力して突き合わせた実測値。
-// h26 で score.weightMiss=25 / heat.phaseLate=9 を確定させた後の値。
+// 🔴 **ここがズレると事故る。ズレて実際に事故った。**
+//
+//	2026-08-16: heat.perElapsedSec をサーバー側で 0.12 にしたのに、こちらを 0.11 の
+//	まま直し忘れた。perElapsedSec は新設キーで DB に無かったため、**画面を開いた瞬間に
+//	こちら側の 0.11 で補完され、そのまま本番DBへ保存**された。誰も気付かないまま
+//	本番が意図と違う値で走っていた。
+//
+// 「既定に戻す」が嘘になるだけではない。**DB に無いキーはこの値で補完されて保存される**ので、
+// ここはサーバー内蔵デフォルトの写しであって「画面の好み」ではない。
+// サーバー側 internal/game/params.go の DefaultParameters() を変えたら必ず両方直すこと。
+// 突き合わせ方: `curl -s https://takoda99.mooo.com/api/params | jq` と目視、または
+// サーバーで `go run` して DefaultParameters() を JSON 出力する。
+//
+// ⚠ この画面が知らないキー／サーバーが返さないキーは、**画面上部のドリフト検出**
+// （lib/drift.ts）が両方向で警告する。警告が出たらここを直すのが正しい対処。
 export const defaultParameters: GameParameters = {
   session: { tickIntervalMs: 150 },
   publish: {
@@ -92,14 +106,16 @@ export const defaultParameters: GameParameters = {
     rankingDeltaIntervalMs: 500,
   },
   matching: { minPlayers: 20, maxPlayers: 99, startCountdownMs: 15000, rosterWaitMs: 3000, readyCountdownMs: 5000, minFill: 99 },
+  // orderCount は h30 で 2/2/1/4 → 3/3/2/6 に引き上げ済み（1語を短くしたぶんを語数で持つ）。
   customer: {
     total: 5000,
-    normal: { attribute: "Normal", weight: 70, orderCount: 2 },
-    bonus: { attribute: "Bonus", weight: 15, orderCount: 2 },
-    claimer: { attribute: "Claimer", weight: 10, orderCount: 1 },
-    buzz: { attribute: "Buzz", weight: 5, orderCount: 4 },
+    normal: { attribute: "Normal", weight: 70, orderCount: 3 },
+    bonus: { attribute: "Bonus", weight: 15, orderCount: 3 },
+    claimer: { attribute: "Claimer", weight: 10, orderCount: 2 },
+    buzz: { attribute: "Buzz", weight: 5, orderCount: 6 },
   },
-  score: { weightTakoyaki: 100, weightMiss: 25 },
+  // weightMiss は h30 で 25 → 30（1語が短くなってミスの罰が相対的に軽くなったぶんの補正）。
+  score: { weightTakoyaki: 100, weightMiss: 30 },
   sanity: { minMsPerWord: 200 },
   phase: {
     midAliveThreshold: 70,
@@ -114,6 +130,8 @@ export const defaultParameters: GameParameters = {
   // 既定値で補完されて 0.11 が保存された。0.11 だと上端(17)への到達が 119秒で
   // **上端に居るのが1秒**しかなく、level 17 の語（約43打鍵≒10秒）が打ち切れない。
   heat: { base: 0, perAliveDrop: 0.03, perElapsedSec: 0.12, phaseEarly: 0, phaseMid: 1, phaseLate: 2, maxLevel: 17 },
+  // 両方 0 ＝ 現行と完全に同じ挙動（お題の level は heat と1対1）。plan-h35 §7.3。
+  odai: { levelSpread: 0, levelOffset: 0 },
   cull: {
     stages: [
       { atMs: 20000, targetAliveCount: 75 },
@@ -123,6 +141,8 @@ export const defaultParameters: GameParameters = {
       { atMs: 100000, targetAliveCount: 10 },
       { atMs: 120000, targetAliveCount: 0 },
     ],
+    // 🔴 サーバー側の const DefaultCullWarnMaxIds と同値。クライアントと合意済みの 24。
+    warnMaxIds: 24,
   },
   distribution: { queueRefillThreshold: 5 },
   presentation: { finalStageAliveThreshold: 20, finalRushAliveThreshold: 10 },
@@ -245,6 +265,12 @@ export type FieldSpec = {
   /** true=小数可（既定は整数）。input の step と検証の両方に効く。 */
   float?: boolean;
   /**
+   * true=負の値を許す（既定は 0 以上のみ）。
+   * odai.levelOffset のように「−1 でやさしくする」が正常な使い方の項目に付ける。
+   * 付け忘れると検証が負値を弾いて**そのツマミが片側にしか動かない**。
+   */
+  signed?: boolean;
+  /**
    * true=真偽値（トグルで編集する）。
    * **数値パスの一覧（allFieldPaths）からは除外される**ので、数値前提の検証・補完に混ざらない。
    */
@@ -342,6 +368,14 @@ export const schema: GroupSpec[] = [
     icon: "✂️",
     desc: "20秒ごとに、生存数が目標まで減るようスコア下位から脱落させる。⚠ 試合はこのスケジュールの最終段階（120秒）で全店が脱落して終わる。",
     timing: "next-match",
+    fields: [
+      {
+        path: "cull.warnMaxIds",
+        label: "予告に載せる店数の上限",
+        unit: "店",
+        help: "「次の足切りで切られる店」としてクライアントへ送るIDの最大件数（危ない順）。🔴 既定24は**クライアントと合意済みの値**（初回の足切り99→75でちょうど24店が切られるため、最も人数が多い段階でも全員を出し切れる）。当日に勝手に変えず、変えるときは必ずクライアント担当に共有すること。下げれば送信量が減る（会場の回線が厳しい時の逃げ道）、上げればデバッグ時に全件見える。0 にするとサーバー側で既定24として扱われる（＝「1件も送らない」にはできない）。",
+      },
+    ],
     matrix: {
       title: "6段階のスケジュール",
       desc: "時刻は企画で確定しており変更できない（20秒等間隔・120秒で終了）。動かしてよいのは第2〜第4段階の目標生存数だけ。",
@@ -519,6 +553,26 @@ export const schema: GroupSpec[] = [
         path: "heat.maxLevel",
         label: "火力の上限",
         help: `火力の頭打ち。お題辞書の level はここまで用意されている必要がある（現在の辞書は 0〜${MAX_WORD_LEVEL}）。超えた分は語がなく下位 level にフォールバックするので、実質的に難度が上がらなくなる。`,
+      },
+    ],
+  },
+  {
+    key: "odai",
+    title: "お題の難度（微調整）",
+    icon: "📝",
+    desc: "★当日いちばん安全に触れる難度ツマミ。火力（heat）が決めたレベルに対して、お題だけを上下・ばらつかせる。⚠ 両方 0 が既定で、そのときは火力とお題が完全に1対1（従来どおり）。",
+    timing: "next-match",
+    fields: [
+      {
+        path: "odai.levelOffset",
+        label: "難度の下駄（±）",
+        signed: true,
+        help: "火力が決めたレベルに足す値。−1 でお題だけ1段やさしく、+1 で1段難しくなる。★「難しすぎる／簡単すぎる」と感じたらまずここを ±1 する。火力（heat）を触るとカーブの形が変わるうえクライアントの難度表示まで動くが、こちらは**形も表示も変えずに平行移動**できるので当日の調整として安全。負の値も入れてよい（レベルは0で止まる）。",
+      },
+      {
+        path: "odai.levelSpread",
+        label: "1語ごとのばらつき（±）",
+        help: "1語ずつレベルを「火力±この値」の範囲からランダムに選ぶ。0（既定）だと同じ瞬間の語は全店・全客が同じレベルで、難度が上がる＝一律に全部難しくなる、という単調な動きしかない。2 にすると同じ火力でも語の長さに幅が出る。⚠ 上振れして辞書の上限を超えた分は自動的に下のレベルへ落ちるので壊れない。",
       },
     ],
   },
@@ -713,15 +767,27 @@ export function allReadonlyPaths(): string[] {
 export type EditValue = number | boolean;
 
 /** allFieldSpecs はパス→表示情報の辞書。差分表示のラベル解決に使う。 */
-export function allFieldSpecs(): Map<string, { label: string; group: string; unit?: string; float?: boolean }> {
-  const m = new Map<string, { label: string; group: string; unit?: string; float?: boolean }>();
+export function allFieldSpecs(): Map<
+  string,
+  { label: string; group: string; unit?: string; float?: boolean; signed?: boolean }
+> {
+  const m = new Map<
+    string,
+    { label: string; group: string; unit?: string; float?: boolean; signed?: boolean }
+  >();
   for (const g of schema) {
     for (const f of g.fields ?? []) {
-      m.set(f.path, { label: f.label, group: g.title, unit: f.unit, float: f.float });
+      m.set(f.path, { label: f.label, group: g.title, unit: f.unit, float: f.float, signed: f.signed });
     }
     for (const sg of g.subgroups ?? []) {
       for (const f of sg.fields) {
-        m.set(f.path, { label: `${sg.title} / ${f.label}`, group: g.title, unit: f.unit, float: f.float });
+        m.set(f.path, {
+          label: `${sg.title} / ${f.label}`,
+          group: g.title,
+          unit: f.unit,
+          float: f.float,
+          signed: f.signed,
+        });
       }
     }
     if (g.matrix) {
