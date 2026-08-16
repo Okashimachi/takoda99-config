@@ -56,6 +56,8 @@ export type GameParameters = {
   heat: {
     base: number;
     perAliveDrop: number;
+    /** 経過1秒あたりの上昇（plan-h32）。難度カーブの主軸。 */
+    perElapsedSec: number;
     phaseEarly: number;
     phaseMid: number;
     phaseLate: number;
@@ -105,7 +107,8 @@ export const defaultParameters: GameParameters = {
     midTimeMs: 30000,
     lateTimeMs: 90000,
   },
-  heat: { base: 0, perAliveDrop: 0.1, phaseEarly: 0, phaseMid: 3, phaseLate: 9, maxLevel: 17 },
+  // h32 で難度カーブを時間主軸に組み替えた（perElapsedSec 新設・phaseLate 9→2）。
+  heat: { base: 0, perAliveDrop: 0.03, perElapsedSec: 0.11, phaseEarly: 0, phaseMid: 1, phaseLate: 2, maxLevel: 17 },
   cull: {
     stages: [
       { atMs: 20000, targetAliveCount: 75 },
@@ -472,7 +475,7 @@ export const schema: GroupSpec[] = [
     key: "heat",
     title: "火力（お題の難度）",
     icon: "🔥",
-    desc: "お題の難易度レベル。生存数が減るほど、フェーズが進むほど上がる。式＝基礎 + 減少係数×(総店数−生存数) + フェーズ加算、上限でクランプ。",
+    desc: "お題の難易度レベル。時間が経つほど、生存数が減るほど上がる。式＝基礎 + 減少係数×(総店数−生存数) + 秒あたり上昇×経過秒 + フェーズ加算、上限でクランプ。⚠ 主軸は「秒あたり上昇」。フェーズ加算はEarly/Mid/Lateの離散イベントなので、大きくすると難度がその瞬間に跳ねる（h32）。",
     timing: "next-match",
     fields: [
       {
@@ -484,7 +487,13 @@ export const schema: GroupSpec[] = [
         path: "heat.perAliveDrop",
         label: "1店脱落あたりの上昇",
         float: true,
-        help: "店が1つ脱落するごとに火力へ加える量（0.1なら10店脱落で+1）。上げるほど終盤の難度が急に上がる。",
+        help: "店が1つ脱落するごとに火力へ加える量（0.03なら33店脱落で+1）。切り捨てなので足切りの瞬間だけ段差になる。カーブの主役は下の「1秒あたりの上昇」で、ここは終盤の重み付け。",
+      },
+      {
+        path: "heat.perElapsedSec",
+        label: "1秒あたりの上昇",
+        float: true,
+        help: "経過1秒ごとに火力へ加える量（0.11なら120秒で+13）。⚠ 難度カーブの主軸。ここを0にすると生存数とフェーズだけで難度が決まり、階段状のカーブに戻る（h32）。",
       },
       {
         path: "heat.phaseEarly",
@@ -499,7 +508,7 @@ export const schema: GroupSpec[] = [
       {
         path: "heat.phaseLate",
         label: "終盤の加算",
-        help: "終盤フェーズの間だけ火力に加える量。序盤・中盤より大きくして終盤感を出す。⚠ 既定9は「決勝(生存10店)でちょうど辞書上端に届く」ように決めた値。下げると最上位レベルの語が一度も出なくなる。",
+        help: "終盤フェーズの間だけ火力に加える量。⚠ フェーズは離散イベントなので、中盤の加算と差を付けすぎると終盤突入の瞬間に難度が跳ねる（旧値9では +8 跳んでいた）。終盤を難しくしたいときは、ここではなく「1秒あたりの上昇」を上げる（h32）。",
       },
       {
         path: "heat.maxLevel",

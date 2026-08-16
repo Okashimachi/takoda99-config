@@ -260,9 +260,35 @@ export function riskWarnings(p: GameParameters, maxWordLevel = MAX_WORD_LEVEL): 
       `自分のスコア・順位の配信が ${n("publish.evaluationIntervalMs")}ms 間隔と遅く、順位表示がもたつきます（2〜4Hz＝250〜500ms が目安）`,
     );
   }
-  if (n("heat.phaseLate") < 9) {
+  // --- 難度カーブ（plan-h32）----------------------------------------------
+  //
+  // 🔴 「火力が辞書の上端に届かない」は #75 → h26 → h32 と**3回**再発している。
+  // 旧ルール（phaseLate < 9 なら警告）は phaseLate だけを見ていたため、
+  // perAliveDrop を 0.1→0.05 に下げたときに素通りし、本番で上端に届かなくなった。
+  // **式そのものを再現して到達値を出す**のが再発防止になる。
+  //
+  //   heat = base + int(perAliveDrop×脱落数) + int(perElapsedSec×経過秒) + フェーズ加算
+  const durationSec = (stages[stages.length - 1]?.atMs ?? 0) / 1000;
+  // 最終ステージ(生存0)の1つ手前が「決勝の生存数」。試合はここで最高難度になる。
+  const finalAlive = stages[stages.length - 2]?.targetAliveCount ?? 0;
+  const peakHeat =
+    n("heat.base") +
+    Math.floor(n("heat.perAliveDrop") * (n("matching.maxPlayers") - finalAlive)) +
+    Math.floor(n("heat.perElapsedSec") * durationSec) +
+    n("heat.phaseLate");
+  if (peakHeat < n("heat.maxLevel")) {
     w.push(
-      `終盤の火力加算が ${n("heat.phaseLate")} です。9 未満だと決勝(生存10店)でお題辞書の最上位レベルに届かず、用意した語彙が使われません`,
+      `火力が試合終了(${durationSec}秒・生存${finalAlive}店)までに ${peakHeat} までしか上がらず、上限 ${n("heat.maxLevel")} に届きません。最上位レベルの語彙が一度も出ず、「火力の上限」が効かないツマミになります（「1秒あたりの上昇」を上げてください）`,
+    );
+  }
+  if (n("heat.perElapsedSec") <= 0) {
+    w.push(
+      "火力の「1秒あたりの上昇」が 0 です。難度が生存数とフェーズでしか動かず、足切りの瞬間だけ跳ねる階段状のカーブになります（h32 で時間主軸に変えた項目）",
+    );
+  }
+  if (n("heat.phaseLate") - n("heat.phaseMid") >= 4) {
+    w.push(
+      `終盤フェーズ突入で火力が一気に +${n("heat.phaseLate") - n("heat.phaseMid")} 跳ねます。プレイヤーには「別のゲームに切り替わった」ように感じられます（差は小さくし、難度は「1秒あたりの上昇」で上げてください）`,
     );
   }
 
