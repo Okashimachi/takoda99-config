@@ -10,6 +10,7 @@
 // サーバー側の検証を省く理由にはしない（plan-h24 §4.4）。
 
 import {
+  BOT_TIER_COUNT,
   CULL_STAGE_COUNT,
   MAX_WORD_LEVEL,
   allFieldPaths,
@@ -52,12 +53,7 @@ export function validate(p: GameParameters): Issue[] {
   if (n("session.tickIntervalMs") <= 0) {
     errs.push({ path: "session.tickIntervalMs", message: "tick 周期は 1 以上である必要があります" });
   }
-  if (n("bot.baseElapsedMs") <= 0) {
-    errs.push({ path: "bot.baseElapsedMs", message: "Bot の1お題の時間は 1 以上である必要があります" });
-  }
-  if (n("bot.baseAccuracy") < 0 || n("bot.baseAccuracy") > 1) {
-    errs.push({ path: "bot.baseAccuracy", message: "Bot の精度は 0〜1 の範囲である必要があります" });
-  }
+  errs.push(...validateBot(p));
   if (n("heat.maxLevel") <= 0) {
     errs.push({ path: "heat.maxLevel", message: "火力の上限は 1 以上である必要があります" });
   }
@@ -127,6 +123,44 @@ export function validate(p: GameParameters): Issue[] {
     errs.push({
       path: "presentation.finalRushAliveThreshold",
       message: "最終盤演出のしきい値は終盤演出以下にしてください",
+    });
+  }
+  return errs;
+}
+
+/**
+ * validateBot は Bot の階層を検証する。サーバー BotParams.validate と同一条件。
+ *
+ * 🔴 **0 は弾かない。** サーバー側は 0 を「未設定」として既定値へ読み替える
+ * （本番DBの bot グループは旧スキーマなので tiers が存在せず、0 のまま読まれるため。
+ * ここで弾く＝サーバーでも弾く設計にすると、設定が丸ごと内蔵デフォルトへ巻き戻る）。
+ * 弾くのは負値と、確率として成立しないミス率 > 1 だけ。
+ */
+function validateBot(p: GameParameters): Issue[] {
+  const errs: Issue[] = [];
+  const tiers = p.bot?.tiers;
+  if (!Array.isArray(tiers) || tiers.length !== BOT_TIER_COUNT) {
+    errs.push({
+      path: "bot.tiers.0.msPerKey",
+      message: `Bot の階層は ${BOT_TIER_COUNT} 段階ちょうどである必要があります（現在 ${Array.isArray(tiers) ? tiers.length : 0} 段階）`,
+    });
+    return errs;
+  }
+  tiers.forEach((t, i) => {
+    const rate = Number(t?.missRate);
+    if (Number.isFinite(rate) && (rate < 0 || rate > 1)) {
+      errs.push({
+        path: `bot.tiers.${i}.missRate`,
+        message: `第${i + 1}階層: ミス率は 0〜1 の範囲である必要があります`,
+      });
+    }
+    // weight / msPerKey / heatPenalty の負値・非数値は共通チェックが弾く。
+  });
+  const spread = getNumber(p, "bot.individualSpread");
+  if (Number.isFinite(spread) && spread >= 1) {
+    errs.push({
+      path: "bot.individualSpread",
+      message: "個体差の幅は 1 未満である必要があります（1 以上だと個体係数が 0 以下になり所要時間が壊れます）",
     });
   }
   return errs;
@@ -252,8 +286,42 @@ export function riskWarnings(p: GameParameters, maxWordLevel = MAX_WORD_LEVEL): 
     );
   }
 
-  if (n("bot.baseAccuracy") > 0.95 || n("bot.baseElapsedMs") < 1000) {
-    w.push("Bot が人間より強い設定です（精度が高すぎる、または1お題が速すぎる）");
+  // --- Bot の階層（plan-h31）----------------------------------------------
+  //
+  // 狙いは「人間が真ん中あたりに来る」こと。既定 150/200/280 ms/打鍵は
+  // 「普通の人間＝200ms/打鍵」を中心に置いてあり、この人がちょうど 54位/100 に来る。
+  const tiers = p.bot?.tiers ?? [];
+  if (tiers.length === BOT_TIER_COUNT) {
+    const ms = tiers.map((t) => Number(t?.msPerKey));
+    if (ms.every((v) => Number.isFinite(v) && v > 0)) {
+      const fastest = Math.min(...ms);
+      const slowest = Math.max(...ms);
+      if (slowest < 150) {
+        w.push(
+          `Bot が全階層とも ${slowest}ms/打鍵より速く、人間より強い設定です（普通の人間は 200ms/打鍵が目安）。人間が20秒で全滅します`,
+        );
+      }
+      if (fastest > 300) {
+        w.push(
+          `Bot が全階層とも ${fastest}ms/打鍵より遅く、人間が上位を独占します（足切りが機能しません）`,
+        );
+      }
+      // 「強いほど速い」が崩れると階層という概念が意味を失う（表示は強→弱の順）。
+      if (!(ms[0] < ms[1] && ms[1] < ms[2])) {
+        w.push(
+          `Bot の階層が「強→中→弱」の順に遅くなっていません（1打鍵の時間: ${ms.join(" / ")}）。表の並びと強さが食い違います`,
+        );
+      }
+    }
+    const weightSum = tiers.reduce((s, t) => s + (Number(t?.weight) || 0), 0);
+    if (weightSum <= 0) {
+      w.push("Bot の階層の出現比が全て 0 です。サーバー側で既定（25/50/25）に読み替えられます");
+    }
+  }
+  if (Number.isFinite(n("bot.individualSpread")) && n("bot.individualSpread") === 0) {
+    w.push(
+      "Bot の個体差の幅が 0 です。これは「個体差なし」ではなく**未設定**として扱われ、サーバー側で既定 0.20 に読み替えられます（実質的に切りたいなら 0.001 のような極小値を入れてください）",
+    );
   }
   if (n("session.tickIntervalMs") < 50) {
     w.push(

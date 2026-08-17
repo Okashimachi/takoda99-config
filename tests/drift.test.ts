@@ -42,21 +42,22 @@ test("configHash はドリフト扱いしない（GameParameters の外側のキ
 
 test("サーバーが先に増やしたキーは未知リーフとして検出され、型が分かる", () => {
   const raw = serverJson();
-  // h31 で bot が増えた想定 ＋ 画面が知らないグループごと増えた想定。
-  (raw.bot as Record<string, unknown>).individualSpread = 0.25;
-  (raw.bot as Record<string, unknown>).tiersEnabled = true;
+  // 将来 bot にフィールドが増えた想定 ＋ 画面が知らないグループごと増えた想定。
+  // （h31 の individualSpread / tiers はもうスキーマ側にあるので、未知の例には使えない）
+  (raw.bot as Record<string, unknown>).fatigueRate = 0.25;
+  (raw.bot as Record<string, unknown>).learningEnabled = true;
   raw.mystery = { alpha: 3, label: "なぞ" };
 
   const d = detectDrift(raw);
   const paths = d.unknown.map((u) => u.path);
-  assert.deepEqual(paths, ["bot.individualSpread", "bot.tiersEnabled", "mystery.alpha", "mystery.label"]);
-  assert.equal(d.unknown.find((u) => u.path === "bot.tiersEnabled")?.kind, "boolean");
+  assert.deepEqual(paths, ["bot.fatigueRate", "bot.learningEnabled", "mystery.alpha", "mystery.label"]);
+  assert.equal(d.unknown.find((u) => u.path === "bot.learningEnabled")?.kind, "boolean");
   assert.equal(d.unknown.find((u) => u.path === "mystery.label")?.kind, "string");
 
   // 文字列は編集させない（型が分からないものを壊せないように）。
   assert.deepEqual(
     editableUnknown(d).map((u) => u.path),
-    ["bot.individualSpread", "bot.tiersEnabled", "mystery.alpha"],
+    ["bot.fatigueRate", "bot.learningEnabled", "mystery.alpha"],
   );
 });
 
@@ -87,17 +88,17 @@ test("ドリフト検出は fillMissing 前の生JSONに掛ける前提（欠落
 
 test("applyEdits は未知フィールドを保存で落とさない（設計の肝の回帰固定）", () => {
   const raw = serverJson();
-  (raw.bot as Record<string, unknown>).individualSpread = 0.25;
+  (raw.bot as Record<string, unknown>).fatigueRate = 0.25;
   raw.mystery = { alpha: 3, label: "なぞ" };
 
   const edits = new Map<string, EditValue>([
     ["score.weightMiss", 28],
-    ["bot.individualSpread", 0.4], // 未知リーフも編集できる
+    ["bot.fatigueRate", 0.4], // 未知リーフも編集できる
   ]);
   const saved = applyEdits(raw, edits);
 
   assert.equal(getPath(saved, "score.weightMiss"), 28, "既知の編集が反映されていない");
-  assert.equal(getPath(saved, "bot.individualSpread"), 0.4, "未知リーフの編集が反映されていない");
+  assert.equal(getPath(saved, "bot.fatigueRate"), 0.4, "未知リーフの編集が反映されていない");
   assert.equal(getPath(saved, "mystery.label"), "なぞ", "未知フィールドが落ちた");
   assert.equal(getPath(saved, "customer.normal.attribute"), "Normal", "スキーマ外の文字列が落ちた");
   assert.equal(getPath(saved, "configHash"), "d0b875b9", "configHash が落ちた");
@@ -128,6 +129,23 @@ test("画面の既定値がサーバー内蔵デフォルトの写しになっ�
     "odai.levelSpread": 0,
     "odai.levelOffset": 0,
     "cull.warnMaxIds": 24,
+    // h31: Bot の tier。🔴 tiers も individualSpread も**本番DBに無いキー**なので、
+    // ここがサーバーとズレていると画面を開いて保存した瞬間にズレた値が本番へ入る
+    // （2026-08-16 の heat.perElapsedSec とまったく同じ経路）。
+    "bot.tiers.0.weight": 25,
+    "bot.tiers.0.msPerKey": 150,
+    "bot.tiers.0.missRate": 0.02,
+    "bot.tiers.0.heatPenalty": 0.01,
+    "bot.tiers.1.weight": 50,
+    "bot.tiers.1.msPerKey": 200,
+    "bot.tiers.1.missRate": 0.05,
+    "bot.tiers.1.heatPenalty": 0.02,
+    "bot.tiers.2.weight": 25,
+    "bot.tiers.2.msPerKey": 280,
+    "bot.tiers.2.missRate": 0.1,
+    "bot.tiers.2.heatPenalty": 0.04,
+    "bot.individualSpread": 0.2,
+    "bot.elapsedJitterMs": 500,
   };
   for (const [path, want] of Object.entries(expected)) {
     assert.equal(
@@ -179,5 +197,77 @@ test("書き出しファイル名に日時と configHash が入る", () => {
   assert.equal(
     exportFileName("a69d02c9", new Date(2026, 7, 24, 9, 5)),
     "takoda99-params-20260824-0905-a69d02c9.json",
+  );
+});
+
+// ── Bot の階層（plan-h31）─────────────────────────────────────────
+
+// 🔴 サーバーは 0 を「未設定」として既定へ読み替えるので、**画面側も 0 を弾いてはいけない**。
+// 弾く設計にすると「サーバーでも弾く」に揃えたくなり、本番DBに tiers が無い状態で
+// Load が落ちて設定が丸ごと内蔵デフォルトへ巻き戻る（#124 と同じ経路）。
+test("bot.tiers はゼロを許し、ミス率>1 と個体差>=1 を弾く", () => {
+  const p = structuredClone(defaultParameters);
+  p.bot.tiers[2] = { weight: 0, msPerKey: 0, missRate: 0, heatPenalty: 0 };
+  p.bot.individualSpread = 0;
+  assert.deepEqual(validate(p), [], "ゼロは「未設定」なので保存できるべき");
+
+  const q = structuredClone(defaultParameters);
+  q.bot.tiers[1].missRate = 1.5;
+  assert.ok(validate(q).length > 0, "ミス率 1.5 は確率として成立しない");
+
+  const r = structuredClone(defaultParameters);
+  r.bot.individualSpread = 1;
+  assert.ok(validate(r).length > 0, "個体差 1 以上は個体係数が 0 以下になりうる");
+
+  const s = structuredClone(defaultParameters);
+  s.bot.tiers[0].msPerKey = -1;
+  assert.ok(validate(s).length > 0, "負値は弾く");
+});
+
+test("bot.tiers の段階数が 3 でないと弾く（ゼロ埋めの罠の入口）", () => {
+  const p = structuredClone(defaultParameters);
+  p.bot.tiers.pop();
+  assert.ok(validate(p).length > 0);
+});
+
+test("bot.tiers のミス率・難度への弱さは小数を受け付ける", () => {
+  // matrix の列に float を付け忘れると「整数で入力してください」が出て
+  // そのマスが**編集できないツマミ**になる。既定値そのものが小数なので、
+  // 既定が検証を通ることでこれを固定できる。
+  const p = structuredClone(defaultParameters);
+  p.bot.tiers[1].missRate = 0.035;
+  p.bot.tiers[1].heatPenalty = 0.025;
+  assert.deepEqual(validate(p), []);
+});
+
+test("Bot が全階層とも人間より速い／遅い設定は保存前に警告する", () => {
+  const fast = structuredClone(defaultParameters);
+  fast.bot.tiers.forEach((t) => (t.msPerKey = 60));
+  assert.ok(
+    riskWarnings(fast).some((m) => m.includes("人間より強い")),
+    `速すぎ警告が出ていない: ${JSON.stringify(riskWarnings(fast))}`,
+  );
+
+  const slow = structuredClone(defaultParameters);
+  slow.bot.tiers.forEach((t) => (t.msPerKey = 400));
+  assert.ok(
+    slow.bot.tiers.length === 3 && riskWarnings(slow).some((m) => m.includes("上位を独占")),
+    `遅すぎ警告が出ていない: ${JSON.stringify(riskWarnings(slow))}`,
+  );
+
+  // 「強→中→弱」の順に遅くなっていないと階層の意味が消える。
+  const inverted = structuredClone(defaultParameters);
+  inverted.bot.tiers[0].msPerKey = 300;
+  assert.ok(riskWarnings(inverted).some((m) => m.includes("強→中→弱")));
+
+  // 個体差 0 は「未設定」であることを保存前に伝える。
+  const flat = structuredClone(defaultParameters);
+  flat.bot.individualSpread = 0;
+  assert.ok(riskWarnings(flat).some((m) => m.includes("未設定")));
+
+  // 既定値では余計な警告を出さない（当日ダイアログがうるさくならないこと）。
+  assert.deepEqual(
+    riskWarnings(defaultParameters).filter((m) => m.includes("Bot")),
+    [],
   );
 });
