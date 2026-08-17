@@ -1,0 +1,18 @@
+// npm test 用。lib/ と tests/ だけを CommonJS へ落として node --test で実行する。
+//
+// ⚠ テストランナー（vitest/jest）は**あえて入れていない**。本戦（2026-08-24）まで日が無く、
+// 依存を増やすと当日 `npm ci` が失敗した時に画面ごと出せなくなる。
+// Node 標準の node:test と tsc だけで回せる範囲に留めてある。
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "outDir": ".test-out",
+    "incremental": false,
+    "jsx": "react-jsx",
+    "types": ["node"]
+  },
+  "include": ["lib/**/*.ts", "tests/**/*.ts"]
+}

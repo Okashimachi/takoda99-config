@@ -34,7 +34,9 @@ export function validate(p: GameParameters): Issue[] {
       errs.push({ path, message: `${label}: 数値を入力してください` });
       continue;
     }
-    if (v < 0) {
+    // signed が付いた項目（odai.levelOffset）だけは負値が正常な使い方。
+    // ここを一律に弾くと「お題だけやさしくする」ができず、片側にしか動かないツマミになる。
+    if (v < 0 && !spec?.signed) {
       errs.push({ path, message: `${label}: 0 以上にしてください` });
       continue;
     }
@@ -80,6 +82,14 @@ export function validate(p: GameParameters): Issue[] {
 
   // --- 足切りスケジュール（サーバー CullParams.validate と同一条件）-----------
   errs.push(...validateCull(p));
+
+  // --- お題のツマミ（plan-h35 §2）------------------------------------------
+  // levelSpread が負だとサーバーの rng.Intn が panic する（サーバー側 Validate も弾く）。
+  // 共通チェックが既に負値を弾いているが、条件を緩めた時に素通りしないよう明示しておく。
+  if (n("odai.levelSpread") < 0) {
+    errs.push({ path: "odai.levelSpread", message: "1語ごとのばらつきは 0 以上にしてください" });
+  }
+  // warnMaxIds は 0 を許す（サーバーが「未設定」として既定24に読み替えるため）。負値は共通チェック。
 
   // --- フロント独自の整合性チェック ---------------------------------------
   if (n("matching.minPlayers") > n("matching.maxPlayers")) {
@@ -193,12 +203,12 @@ export function riskWarnings(p: GameParameters, maxWordLevel = MAX_WORD_LEVEL): 
     const ratio = wm / wt;
     if (ratio < 0.18) {
       w.push(
-        `ミス減点がたこ焼き加点の ${(ratio * 100).toFixed(0)}% と軽く、「ミスを恐れず速く打つ」一辺倒になります（既定は25%。シミュレーションでは18%で正確に打つ人が下位3分の1に沈みました）`,
+        `ミス減点がたこ焼き加点の ${(ratio * 100).toFixed(0)}% と軽く、「ミスを恐れず速く打つ」一辺倒になります（既定は30%。シミュレーションでは18%で正確に打つ人が下位3分の1に沈みました）`,
       );
     }
-    if (ratio > 0.4) {
+    if (ratio > 0.45) {
       w.push(
-        `ミス減点がたこ焼き加点の ${(ratio * 100).toFixed(0)}% と重く、速く打つ意味が薄くなります（既定は25%）`,
+        `ミス減点がたこ焼き加点の ${(ratio * 100).toFixed(0)}% と重く、速く打つ意味が薄くなります（既定は30%）`,
       );
     }
   }
@@ -286,6 +296,29 @@ export function riskWarnings(p: GameParameters, maxWordLevel = MAX_WORD_LEVEL): 
       "火力の「1秒あたりの上昇」が 0 です。難度が生存数とフェーズでしか動かず、足切りの瞬間だけ跳ねる階段状のカーブになります（h32 で時間主軸に変えた項目）",
     );
   }
+  // --- お題のツマミ（plan-h35 §2）------------------------------------------
+  //
+  // 🔴 warnMaxIds は**クライアントと合意済みの値**。黙って変えるとクライアント側の
+  // 右パネルの想定件数と食い違う。保存前に必ず気付けるようにする。
+  const warnMax = n("cull.warnMaxIds");
+  if (Number.isFinite(warnMax) && warnMax !== 24) {
+    w.push(
+      `足切り予告に載せる店数の上限が ${warnMax} です（既定24）。**24 はクライアントと合意済みの値**なので、変えるならクライアント担当に必ず共有してください`,
+    );
+  }
+  const off = n("odai.levelOffset");
+  if (Number.isFinite(off) && off !== 0) {
+    w.push(
+      `お題の難度に ${off > 0 ? "+" : ""}${off} の下駄がかかります。クライアントに表示される火力レベルは変わらないので、**表示より${off > 0 ? "難しい" : "やさしい"}お題**が出ます（それがこのツマミの狙いですが、当日の混乱の元にもなります）`,
+    );
+  }
+  const spread = n("odai.levelSpread");
+  if (Number.isFinite(spread) && spread >= 4) {
+    w.push(
+      `お題のばらつきが ±${spread} と大きく、同じ火力でも簡単な語と難しい語が混ざりすぎて「運で決まる」感じが出ます`,
+    );
+  }
+
   if (n("heat.phaseLate") - n("heat.phaseMid") >= 4) {
     w.push(
       `終盤フェーズ突入で火力が一気に +${n("heat.phaseLate") - n("heat.phaseMid")} 跳ねます。プレイヤーには「別のゲームに切り替わった」ように感じられます（差は小さくし、難度は「1秒あたりの上昇」で上げてください）`,

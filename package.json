@@ -7,7 +7,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsc --project tsconfig.test.json && node --test \".test-out/tests/*.test.js\""
   },
   "dependencies": {
     "next": "^15.5.4",

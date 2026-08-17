@@ -1,10 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Banner, type Msg } from "@/components/Banner";
 import { BoolField, NumberField } from "@/components/NumberField";
 import { useToken } from "@/components/Chrome";
 import { ApiError, getParams, getWords, saveParams } from "@/lib/api";
+import {
+  detectDrift,
+  editableUnknown,
+  exportFileName,
+  parseImported,
+  type Drift,
+  type UnknownLeaf,
+} from "@/lib/drift";
 import {
   MAX_WORD_LEVEL,
   TIMING_LABEL,
@@ -52,8 +60,40 @@ export default function ParamsPage() {
   // お題辞書の実際の最大 level。heat.maxLevel の警告に使う（取れなければ既定値）。
   const [maxWordLevel, setMaxWordLevel] = useState(MAX_WORD_LEVEL);
 
+  const fileInput = useRef<HTMLInputElement>(null);
+
   const serverParams = useMemo(() => fillMissing(serverRaw), [serverRaw]);
   const current = useMemo(() => applyEdits(serverParams, edits), [serverParams, edits]);
+
+  // 🔴 ドリフト検出は **fillMissing を通す前の生JSON** に対してやる。
+  // fillMissing 後だと欠けたパスが画面側の既定値で埋まってしまい、いちばん危ない
+  // 「サーバーが返さない＝効かないツマミ」が検出できなくなる（lib/drift.ts 参照）。
+  //
+  // ⚠ **取得できていない間は検出しない。** serverRaw が null（読み込み中・取得失敗）のときに
+  // 掛けると「全項目がサーバーに無い」＝ 61件のドリフトという嘘の警告が出て、
+  // 本物のドリフトが埋もれる。
+  const drift: Drift = useMemo(
+    () =>
+      serverRaw && typeof serverRaw === "object"
+        ? detectDrift(serverRaw)
+        : { unknown: [], missing: [] },
+    [serverRaw],
+  );
+  const configHash = useMemo(() => {
+    const v = getPath(serverRaw, "configHash");
+    return typeof v === "string" ? v : undefined;
+  }, [serverRaw]);
+
+  // この画面が知らないが編集はできるリーフ（数値・真偽値）。差分・保存の対象に含める。
+  const unknownEditable = useMemo(() => editableUnknown(drift), [drift]);
+  const extraNumberPaths = useMemo(
+    () => unknownEditable.filter((u) => u.kind === "number").map((u) => u.path),
+    [unknownEditable],
+  );
+  const extraBoolPaths = useMemo(
+    () => unknownEditable.filter((u) => u.kind === "boolean").map((u) => u.path),
+    [unknownEditable],
+  );
 
   const errors = useMemo(() => validate(current), [current]);
   const errorPaths = useMemo(
@@ -64,7 +104,7 @@ export default function ParamsPage() {
   const specs = useMemo(() => allFieldSpecs(), []);
   const diffs = useMemo(() => {
     const out: { path: string; label: string; from: number | boolean; to: number | boolean }[] = [];
-    for (const path of allFieldPaths()) {
+    for (const path of [...allFieldPaths(), ...extraNumberPaths]) {
       const from = getNumber(serverParams, path);
       const to = getNumber(current, path);
       if (from !== to && !(Number.isNaN(from) && Number.isNaN(to))) {
@@ -73,7 +113,7 @@ export default function ParamsPage() {
     }
     // 真偽値（publish.rankingDeltaEnabled）も差分に載せる。載せないと
     // トグルを切り替えても「未保存の変更」に出ず、保存ボタンが有効にならない。
-    for (const path of allBoolPaths()) {
+    for (const path of [...allBoolPaths(), ...extraBoolPaths]) {
       const from = getPath(serverParams, path) === true;
       const to = getPath(current, path) === true;
       if (from !== to) {
@@ -81,7 +121,7 @@ export default function ParamsPage() {
       }
     }
     return out;
-  }, [serverParams, current, specs]);
+  }, [serverParams, current, specs, extraNumberPaths, extraBoolPaths]);
   const changedPaths = useMemo(() => new Set(diffs.map((d) => d.path)), [diffs]);
   const dirty = diffs.length > 0;
 
@@ -127,18 +167,67 @@ export default function ParamsPage() {
     });
   }
 
-  /** loadInto は「別の値一式」を編集中の状態として読み込む（プリセット・履歴・既定に戻す）。 */
+  /** loadInto は「別の値一式」を編集中の状態として読み込む（プリセット・履歴・既定に戻す・インポート）。 */
   function loadInto(p: GameParameters, note: string) {
     const next = new Map<string, EditValue>();
-    for (const path of allFieldPaths()) {
+    for (const path of [...allFieldPaths(), ...extraNumberPaths]) {
       const v = getNumber(p, path);
       if (Number.isFinite(v)) next.set(path, v);
     }
-    for (const path of allBoolPaths()) {
-      next.set(path, getPath(p, path) === true);
+    for (const path of [...allBoolPaths(), ...extraBoolPaths]) {
+      const v = getPath(p, path);
+      if (typeof v === "boolean") next.set(path, v);
     }
     setEdits(next);
     setMsg({ type: "info", text: `${note}。まだ保存していません（反映するには「保存」）` });
+  }
+
+  /**
+   * 未保存のまま画面を離れようとしたら確認する（plan-h35 §3.2）。
+   *
+   * 当日は焦って画面を離れる。「変えたつもりで保存していない」は設定事故の定番で、
+   * しかも**気付くのが次の試合になってから**なので取り返しがつかない。
+   */
+  useEffect(() => {
+    if (!dirty) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      // 旧仕様のブラウザ向け。文言はブラウザ側が固定のものを出す。
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [dirty]);
+
+  /**
+   * onExport は現在の値を JSON ファイルに書き出す（plan-h35 §3.3）。
+   *
+   * プリセットも履歴も **この端末の localStorage にしか無い**ので、当日に別のPCへ
+   * 引き継ぐ手段がこれ。current はサーバー由来の未知フィールドも保持しているので、
+   * 書き出した JSON はそのまま別端末で読み込める。
+   */
+  function onExport() {
+    try {
+      const blob = new Blob([JSON.stringify(current, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = exportFileName(configHash);
+      a.click();
+      URL.revokeObjectURL(url);
+      setMsg({ type: "ok", text: `現在の値を ${a.download} に書き出しました` });
+    } catch (e) {
+      setMsg({ type: "err", text: "書き出しに失敗しました", detail: String(e) });
+    }
+  }
+
+  async function onImportFile(file: File) {
+    const parsed = parseImported(await file.text());
+    if ("error" in parsed) {
+      setMsg({ type: "err", text: `読み込めませんでした（${file.name}）`, detail: parsed.error });
+      return;
+    }
+    loadInto(parsed.params, `${file.name} を読み込みました`);
   }
 
   function onReload() {
@@ -242,6 +331,58 @@ export default function ParamsPage() {
         <Banner msg={msg} onClose={() => setMsg(null)} />
 
         <Intro />
+
+        {/* 走っている設定の身元（plan-h35 §3.1）＋ 持ち出し（§3.3） */}
+        <div className="card mb-4 flex flex-wrap items-center gap-x-3 gap-y-2 p-3">
+          <span className="text-[11px] font-medium text-stone-500 dark:text-stone-400">
+            サーバーの設定ID
+          </span>
+          <code
+            className="rounded-md bg-stone-100 px-2 py-1 font-mono text-[13px] font-semibold text-stone-700 dark:bg-stone-800 dark:text-stone-200"
+            title="configHash。サーバーが返している現在の設定のハッシュ。保存すると変わるので「保存が本当に届いたか」「他の人と同じ設定を見ているか」の照合に使える"
+          >
+            {loading && !serverRaw ? "…" : (configHash ?? "（サーバーが返していません）")}
+          </code>
+          {dirty ? (
+            <span className="badge bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+              未保存 {diffs.length}件
+            </span>
+          ) : serverRaw ? (
+            <span className="badge bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
+              サーバーと一致
+            </span>
+          ) : null}
+
+          <div className="ml-auto flex gap-2">
+            <button onClick={onExport} className="btn-ghost px-2 py-1 text-xs" title="現在の値を JSON ファイルに書き出す（別の端末へ引き継ぐ用）">
+              JSONで書き出し
+            </button>
+            <button
+              onClick={() => fileInput.current?.click()}
+              className="btn-ghost px-2 py-1 text-xs"
+              title="書き出した JSON を編集欄に読み込む（保存は別途「保存」ボタン）"
+            >
+              JSONを読み込み
+            </button>
+            <input
+              ref={fileInput}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.target.value = ""; // 同じファイルを続けて選べるように
+                if (f) void onImportFile(f);
+              }}
+            />
+          </div>
+          <p className="w-full text-[11px] leading-relaxed text-stone-500 dark:text-stone-400">
+            プリセットと変更履歴は<b>この端末の localStorage にしかありません</b>。
+            別のPCやブラウザから開くと消えます。当日に誰かへ引き継ぐなら「JSONで書き出し」を使ってください。
+          </p>
+        </div>
+
+        <DriftBanner drift={drift} />
 
         {/* 検索・表示切替 */}
         <div className="mb-4 flex flex-wrap items-center gap-2">
@@ -409,7 +550,38 @@ export default function ParamsPage() {
               </GroupCard>
             ))}
 
-            {visibleGroups.length === 0 ? (
+            {/* この画面が知らない項目（plan-h35 §4）。スキーマに写す前でも触れるようにする。 */}
+            {drift.unknown.length > 0 ? (
+              <section id="drift" className="card border-amber-300 p-4 dark:border-amber-800 sm:p-5">
+                <div className="mb-1 flex flex-wrap items-center gap-2">
+                  <span className="text-lg leading-none" aria-hidden>
+                    🧩
+                  </span>
+                  <h2 className="text-[15px] font-bold">未対応の項目（{drift.unknown.length}件）</h2>
+                  <span className="badge bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+                    自動表示
+                  </span>
+                </div>
+                <p className="mb-4 text-xs leading-relaxed text-stone-500 dark:text-stone-400">
+                  サーバーは返しているが、この画面のスキーマ（<code>lib/params.ts</code>）に写していない項目。
+                  ラベルもヘルプも無い素の状態だが、<b>触れないよりはるかにマシ</b>なので自動で出している。
+                  落ち着いたら <code>lib/params.ts</code> に正式に足すこと（このカードはその宿題のリマインダー）。
+                </p>
+                <div className="grid gap-x-5 gap-y-4 sm:grid-cols-2 xl:grid-cols-3">
+                  {drift.unknown.map((u) => (
+                    <UnknownField
+                      key={u.path}
+                      leaf={u}
+                      value={getPath(current, u.path)}
+                      changed={changedPaths.has(u.path)}
+                      onChange={(v) => setField(u.path, v)}
+                    />
+                  ))}
+                </div>
+              </section>
+            ) : null}
+
+            {visibleGroups.length === 0 && drift.unknown.length === 0 ? (
               <div className="card p-10 text-center text-sm text-stone-500">
                 「{query}」に一致する項目はありません
               </div>
@@ -422,6 +594,12 @@ export default function ParamsPage() {
       <aside className="space-y-4 lg:sticky lg:top-28 lg:self-start">
         {/* 保存パネル */}
         <div className="card p-4">
+          <div className="mb-2 flex items-baseline justify-between gap-2 text-[11px] text-stone-500 dark:text-stone-400">
+            <span>サーバーの設定ID</span>
+            <code className="font-mono text-stone-600 dark:text-stone-300" title="configHash">
+              {configHash ?? "—"}
+            </code>
+          </div>
           <div className="mb-3 text-sm">
             {dirty ? (
               <details open>
@@ -564,6 +742,145 @@ export default function ParamsPage() {
           ) : null}
         </div>
       </aside>
+    </div>
+  );
+}
+
+/**
+ * DriftBanner はサーバーとこの画面のスキーマのズレを**両方向**で出す（plan-h35 §4）。
+ *
+ * 🔴 2026-08-16 の事故（heat.perElapsedSec の既定値がサーバーと画面でズレていて、
+ * DB に無いキーが画面側の値で補完・保存された）を、画面上で見えるようにするのが目的。
+ *
+ * 片方向だけでは足りない:
+ *   ・サーバーが返すのに画面が知らない → 触れないだけ（下の「未対応の項目」で救済）
+ *   ・画面が持つのにサーバーが返さない → **効かないツマミ**。しかも保存すると
+ *     画面側の既定値がそのまま本番DBへ書き込まれる。こちらのほうが危ない
+ */
+function DriftBanner({ drift }: { drift: Drift }) {
+  if (drift.unknown.length === 0 && drift.missing.length === 0) return null;
+  return (
+    <div className="mb-4 space-y-3">
+      {drift.unknown.length > 0 ? (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
+          <p className="font-medium">
+            ⚠ この画面が知らない項目が {drift.unknown.length} 件あります
+          </p>
+          <p className="mt-1 text-xs leading-relaxed">
+            サーバーが先に更新されて、この画面がまだ追いついていない状態です。保存で値が落ちることはありません。
+            下の<a href="#drift" className="underline">「未対応の項目」</a>から素の入力欄で変更できます。
+          </p>
+          <p className="mt-1 break-all font-mono text-[11px] opacity-80">
+            {drift.unknown.map((u) => u.path).join(" / ")}
+          </p>
+        </div>
+      ) : null}
+
+      {drift.missing.length > 0 ? (
+        <div className="rounded-xl border border-rose-300 bg-rose-50 px-3.5 py-2.5 text-sm text-rose-900 dark:border-rose-800 dark:bg-rose-950 dark:text-rose-200">
+          <p className="font-medium">
+            🔴 この画面にあるのにサーバーが返していない項目が {drift.missing.length} 件あります（効かないツマミ）
+          </p>
+          <p className="mt-1 text-xs leading-relaxed">
+            サーバーが古い（まだデプロイされていない）か、その項目が削除されています。
+            <b>
+              これらの欄には今この画面の既定値が入っており、このまま保存するとその値が本番DBへ書き込まれます。
+            </b>
+            2026-08-16 に <code>heat.perElapsedSec</code> でこれが起き、本番が意図と違う値で走りました。
+            心当たりが無ければ<b>保存せずに</b>サーバー側の担当へ確認してください。
+          </p>
+          <p className="mt-1 break-all font-mono text-[11px] opacity-80">
+            {drift.missing.join(" / ")}
+          </p>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * UnknownField はスキーマに無いリーフの素の入力欄。
+ * 型に応じて数値入力／トグル／読み取り専用テキストを出す（plan-h35 §4.2）。
+ */
+function UnknownField({
+  leaf,
+  value,
+  changed,
+  onChange,
+}: {
+  leaf: UnknownLeaf;
+  value: unknown;
+  changed: boolean;
+  onChange: (v: EditValue) => void;
+}) {
+  const label = (
+    <div className="mb-1 flex items-baseline gap-1.5">
+      {changed ? (
+        <span className="-ml-2.5 text-amber-500" title="未保存の変更">
+          ●
+        </span>
+      ) : null}
+      <code className="min-w-0 break-all text-[12px] font-medium text-stone-700 dark:text-stone-200">
+        {leaf.path}
+      </code>
+    </div>
+  );
+
+  if (leaf.kind === "boolean") {
+    return (
+      <div className="min-w-0">
+        {label}
+        <label className="flex cursor-pointer items-center gap-2">
+          <input
+            type="checkbox"
+            checked={value === true}
+            onChange={(e) => onChange(e.target.checked)}
+            aria-label={leaf.path}
+            className="h-4 w-4 rounded border-stone-300 text-amber-600 focus:ring-amber-200 dark:border-stone-600"
+          />
+          <span className="font-mono text-[11px] text-stone-500 dark:text-stone-400">
+            {value === true ? "ON" : "OFF"}
+          </span>
+        </label>
+      </div>
+    );
+  }
+
+  if (leaf.kind === "number") {
+    const v = typeof value === "number" ? value : Number.NaN;
+    return (
+      <div className="min-w-0">
+        {label}
+        <input
+          type="number"
+          step="any"
+          inputMode="decimal"
+          aria-label={leaf.path}
+          value={Number.isFinite(v) ? v : ""}
+          onChange={(e) => onChange(e.target.valueAsNumber)}
+          className={`field-input ${
+            changed
+              ? "border-amber-400 focus:ring-amber-200 dark:border-amber-600"
+              : "border-stone-300 focus:ring-amber-200 dark:border-stone-700"
+          }`}
+        />
+        <div className="mt-1 text-[11px] text-stone-400 dark:text-stone-600">
+          サーバーの値 {String(leaf.value)}
+        </div>
+      </div>
+    );
+  }
+
+  // 文字列・その他は読み取り専用（型が分からないものを編集させると壊せてしまう）。
+  return (
+    <div className="min-w-0">
+      {label}
+      <div className="rounded-md border border-dashed border-stone-300 bg-stone-50 px-2 py-1.5 font-mono text-[12px] text-stone-500 dark:border-stone-700 dark:bg-stone-800/50 dark:text-stone-400">
+        {JSON.stringify(leaf.value)}
+      </div>
+      <div className="mt-1 text-[11px] text-stone-400 dark:text-stone-600">
+        この型はこの画面から編集できません（保存時もそのまま送られます）
+      </div>
     </div>
   );
 }
