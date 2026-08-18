@@ -134,8 +134,10 @@ export const defaultParameters: GameParameters = {
     claimer: { attribute: "Claimer", weight: 10, orderCount: 2 },
     buzz: { attribute: "Buzz", weight: 5, orderCount: 6 },
   },
-  // weightMiss は h30 で 25 → 30（1語が短くなってミスの罰が相対的に軽くなったぶんの補正）。
-  score: { weightTakoyaki: 100, weightMiss: 30 },
+  // weightMiss は h26(25) → h30(30) → h32後の再測定(22) と3回動いている。
+  // 🔴 サーバー internal/game/params.go の既定値と必ず一致させること（ズレると
+  // DB に無いキーがこちら側の値で保存される。実際 perElapsedSec で起きた）。
+  score: { weightTakoyaki: 100, weightMiss: 22 },
   sanity: { minMsPerWord: 200 },
   phase: {
     midAliveThreshold: 70,
