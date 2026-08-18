@@ -495,8 +495,8 @@ export default function ParamsPage() {
                                       ) : null}
                                       <input
                                         type="number"
-                                        step="1"
-                                        inputMode="numeric"
+                                        step={c.float ? "any" : "1"}
+                                        inputMode={c.float ? "decimal" : "numeric"}
                                         aria-label={`${r.label} ${c.label}`}
                                         aria-invalid={invalid}
                                         value={Number.isFinite(v) ? v : ""}

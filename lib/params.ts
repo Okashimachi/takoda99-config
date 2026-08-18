@@ -21,6 +21,23 @@ export type CullStage = { atMs: number; targetAliveCount: number };
 /** 足切りの段階数。サーバーは [6]CullStage の固定長配列で持つ。 */
 export const CULL_STAGE_COUNT = 6;
 
+/**
+ * Bot の強さ階層1つぶん（plan-h31）。
+ *
+ * 🔴 **速度は「1注文あたり」ではなく「1打鍵あたり」**。お題は火力が上がるほど長くなる
+ * （level 0 で約13打鍵／level 17 で約130打鍵）ので、注文あたりの固定時間で持つと
+ * 終盤ほど Bot だけが相対的に速くなる。
+ */
+export type BotTier = {
+  weight: number;
+  msPerKey: number;
+  missRate: number;
+  heatPenalty: number;
+};
+
+/** Bot の階層数。サーバーは [3]BotTier の固定長配列で持つ（強／中／弱）。 */
+export const BOT_TIER_COUNT = 3;
+
 export type GameParameters = {
   session: { tickIntervalMs: number };
   publish: {
@@ -71,10 +88,13 @@ export type GameParameters = {
     finalStageAliveThreshold: number;
     finalRushAliveThreshold: number;
   };
+  /**
+   * Bot の強さ（plan-h31 で tier 制になった）。
+   * 旧 baseAccuracy / baseElapsedMs / accuracyJitter は**サーバーから削除済み**。
+   */
   bot: {
-    baseAccuracy: number;
-    baseElapsedMs: number;
-    accuracyJitter: number;
+    tiers: BotTier[];
+    individualSpread: number;
     elapsedJitterMs: number;
   };
 };
@@ -146,7 +166,20 @@ export const defaultParameters: GameParameters = {
   },
   distribution: { queueRefillThreshold: 5 },
   presentation: { finalStageAliveThreshold: 20, finalRushAliveThreshold: 10 },
-  bot: { baseAccuracy: 0.85, baseElapsedMs: 4500, accuracyJitter: 0.1, elapsedJitterMs: 500 },
+  // h31: tier（強／中／弱）＋個体差。**サーバー game.DefaultBotTiers() と同値**。
+  //
+  // 🔴 tiers も individualSpread も**本番DBには無いキー**（bot グループは旧スキーマで存在する）。
+  // つまりこの画面を開いて保存した瞬間、ここの値がそのまま本番へ書き込まれる。
+  // サーバー側 internal/game/params.go の DefaultBotTiers() から1文字も変えないこと。
+  bot: {
+    tiers: [
+      { weight: 25, msPerKey: 150, missRate: 0.02, heatPenalty: 0.01 },
+      { weight: 50, msPerKey: 200, missRate: 0.05, heatPenalty: 0.02 },
+      { weight: 25, msPerKey: 400, missRate: 0.1, heatPenalty: 0.04 }, // 🔴 サーバーと一致必須（280 だと初心者が必ず最下位）
+    ],
+    individualSpread: 0.2,
+    elapsedJitterMs: 500,
+  },
 };
 
 // サーバー側 odai.MaxWordLevel。お題辞書が持つ最大 level。
@@ -306,6 +339,11 @@ export type GroupSpec = {
       label: string;
       unit?: string;
       help: string;
+      /**
+       * true=小数可（既定は整数）。bot.tiers の missRate / heatPenalty がこれ。
+       * 付け忘れると検証が「整数で入力してください」を出して**そのマスが編集できなくなる**。
+       */
+      float?: boolean;
       /**
        * true=表示のみ（編集させない）。
        * cull.stages の atMs がこれ。20秒等間隔・120秒は企画で確定しており、
@@ -595,34 +633,61 @@ export const schema: GroupSpec[] = [
     key: "bot",
     title: "CPU（Bot）の強さ",
     icon: "🤖",
-    desc: "人数補完・デモ用のBot。人間と同じ土俵で戦う。強すぎる／弱すぎる時はここ。",
+    desc:
+      "人数補完・デモ用のBot。人間と同じ土俵で戦う。★狙いは「人間が真ん中あたりに来る」こと。" +
+      "強／中／弱の3階層を出現比で抽選し、そこへ個体差を掛けた個体が1体ずつ作られる（h31）。",
     timing: "next-match",
     fields: [
       {
-        path: "bot.baseElapsedMs",
-        label: "1お題にかける時間",
-        unit: "ms",
-        help: "Botがお題1本を打ち切るのにかける時間。小さいほど速い＝強い。人間寄りにするなら上げる。",
-      },
-      {
-        path: "bot.baseAccuracy",
-        label: "精度",
+        path: "bot.individualSpread",
+        label: "個体差の幅",
         float: true,
-        help: "Botの打鍵精度（0〜1。0.85＝85%）。上げるとミス減点が減ってスコアが伸び、強くなる。",
+        help: "同じ階層の中でも1体ずつ強さを散らす幅（0.20＝±20%）。速度とミス率に**同じ係数**が掛かるので「遅い個体はミスも多い」という現実的な散らばりになる。生成時に一度決めたら試合中は変わらない（＝「あの店ずっと速いな」が成立する）。⚠ 0 は「個体差なし」ではなく**未設定**として扱われ、サーバー側で既定 0.20 に読み替えられる。",
       },
       {
         path: "bot.elapsedJitterMs",
-        label: "時間のばらつき",
+        label: "1お題ごとの揺らぎ",
         unit: "ms",
-        help: "1お題ごとに所要時間へ乗せる揺らぎの幅。0 だと全Botが機械的に同じ挙動になる。",
-      },
-      {
-        path: "bot.accuracyJitter",
-        label: "精度のばらつき",
-        float: true,
-        help: "Botごと・お題ごとの精度の揺らぎ幅。上げるとBotの強さに個体差が出る。",
+        help: "お題1本ごとに所要時間へ乗せる揺らぎの幅（±ms）。上の「個体差」とは別物で、こちらは毎回振り直す。0 でも個体差は残る。",
       },
     ],
+    matrix: {
+      title: "強さの階層（強／中／弱）",
+      desc:
+        "「人間が上位を独占する」なら1打鍵の時間を3行とも下げ、「人間が20秒で全滅する」なら3行とも上げる。" +
+        "特定の階層だけが上位を占めているときは、その行の出現比を下げるほうが効く。",
+      rows: [
+        { key: "0", label: "強", note: "速く正確で、難度が上がっても崩れない。上位を占める層" },
+        { key: "1", label: "中", note: "標準。シミュレーションの「普通の人間」と同じ実力に合わせてある" },
+        { key: "2", label: "弱", note: "遅くミスも多く、難度に弱い。終盤で落ちていく層" },
+      ],
+      cols: [
+        {
+          key: "weight",
+          label: "出現比",
+          help: "99体をこの比で3階層へ振り分ける相対値（25/50/25 なら概ね25体・49体・25体）。合計が100である必要はない。0 にするとその階層は出てこない。",
+        },
+        {
+          key: "msPerKey",
+          label: "1打鍵の時間",
+          unit: "ms",
+          help: "★主に触るのはここ。1**打鍵**あたりの時間で、小さいほど速い＝強い。既定 150/200/280 は「普通の人間＝200ms/打鍵」を基準にしてある（この設定だと 200ms/打鍵の人がちょうど真ん中の54位/100に来る）。⚠ お題1本ぶんではなく打鍵1回ぶん（火力が上がると語が長くなるので、1本あたりで持つと終盤にBotだけが速くなる）。",
+        },
+        {
+          key: "missRate",
+          label: "ミス率",
+          float: true,
+          help: "打鍵1回あたりにミスする確率（0.05＝5%）。打鍵ごとに判定するので、長いお題ほどミス数が増える。上げると弱くなる。1 を超える値は入れられない。",
+        },
+        {
+          key: "heatPenalty",
+          label: "難度への弱さ",
+          float: true,
+          help: "火力が上がったときに何倍遅くなるか（0.04 なら火力17で 1+0.04×17＝1.68倍）。弱い階層ほど大きくすると「終盤に弱いBotから落ちる」自然な淘汰になる。0 にすると難度が上がっても速度が落ちない＝上手い。",
+        },
+      ],
+      pathOf: (row, col) => `bot.tiers.${row}.${col}`,
+    },
   },
   {
     key: "presentation",
@@ -797,6 +862,7 @@ export function allFieldSpecs(): Map<
             label: `${r.label} / ${c.label}`,
             group: g.title,
             unit: c.unit,
+            float: c.float,
           });
         }
       }
