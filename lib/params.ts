@@ -175,7 +175,7 @@ export const defaultParameters: GameParameters = {
     tiers: [
       { weight: 25, msPerKey: 150, missRate: 0.02, heatPenalty: 0.01 },
       { weight: 50, msPerKey: 200, missRate: 0.05, heatPenalty: 0.02 },
-      { weight: 25, msPerKey: 280, missRate: 0.1, heatPenalty: 0.04 },
+      { weight: 25, msPerKey: 400, missRate: 0.1, heatPenalty: 0.04 }, // 🔴 サーバーと一致必須（280 だと初心者が必ず最下位）
     ],
     individualSpread: 0.2,
     elapsedJitterMs: 500,

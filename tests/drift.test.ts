@@ -141,7 +141,7 @@ test("画面の既定値がサーバー内蔵デフォルトの写しになっ�
     "bot.tiers.1.missRate": 0.05,
     "bot.tiers.1.heatPenalty": 0.02,
     "bot.tiers.2.weight": 25,
-    "bot.tiers.2.msPerKey": 280,
+    "bot.tiers.2.msPerKey": 400,
     "bot.tiers.2.missRate": 0.1,
     "bot.tiers.2.heatPenalty": 0.04,
     "bot.individualSpread": 0.2,
