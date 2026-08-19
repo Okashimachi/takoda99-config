@@ -13,6 +13,7 @@ import {
   BOT_TIER_COUNT,
   CULL_STAGE_COUNT,
   MAX_WORD_LEVEL,
+  ORDER_TIER_COUNT,
   allFieldPaths,
   allFieldSpecs,
   getNumber,
@@ -54,6 +55,7 @@ export function validate(p: GameParameters): Issue[] {
     errs.push({ path: "session.tickIntervalMs", message: "tick 周期は 1 以上である必要があります" });
   }
   errs.push(...validateBot(p));
+  errs.push(...validateOrderTiers(p));
   if (n("heat.maxLevel") <= 0) {
     errs.push({ path: "heat.maxLevel", message: "火力の上限は 1 以上である必要があります" });
   }
@@ -123,6 +125,27 @@ export function validate(p: GameParameters): Issue[] {
     errs.push({
       path: "presentation.finalRushAliveThreshold",
       message: "最終盤演出のしきい値は終盤演出以下にしてください",
+    });
+  }
+  return errs;
+}
+
+/**
+ * validateOrderTiers は注文数の抽選表を検証する（plan-h36）。
+ *
+ * 🔴 **0 は弾かない。** サーバー側は 0 を「未設定」として既定値へ読み替える
+ * （本番DBの customer グループは h35 以前のスキーマなので orderTiers が存在せず、
+ * 0 のまま読まれるため。ここで弾く＝サーバーでも弾く設計にすると、
+ * **score / cull / heat を含む設定が丸ごと内蔵デフォルトへ巻き戻る**）。
+ * 弾くのは段数の食い違いだけで、負値は共通チェックが見る。
+ */
+function validateOrderTiers(p: GameParameters): Issue[] {
+  const errs: Issue[] = [];
+  const tiers = p.customer?.orderTiers;
+  if (!Array.isArray(tiers) || tiers.length !== ORDER_TIER_COUNT) {
+    errs.push({
+      path: "customer.orderTiers.0.count",
+      message: `注文数の段階は ${ORDER_TIER_COUNT} 段ちょうどである必要があります（現在 ${Array.isArray(tiers) ? tiers.length : 0} 段）`,
     });
   }
   return errs;
@@ -364,6 +387,48 @@ export function riskWarnings(p: GameParameters, maxWordLevel = MAX_WORD_LEVEL): 
       "火力の「1秒あたりの上昇」が 0 です。難度が生存数とフェーズでしか動かず、足切りの瞬間だけ跳ねる階段状のカーブになります（h32 で時間主軸に変えた項目）",
     );
   }
+  // --- 注文数の段階（plan-h36）---------------------------------------------
+  //
+  // 🔴 **守るべき制約は1つだけ「最も軽い段を消さないこと」**。8個の割合は 10%〜40% まで
+  // 振っても実力相関は動かなかったが、全段を重くすると「打ち切れないまま終わる」客が増え、
+  // 遅い人が0点のまま終わる（実測 0.95 → 0.88）。保存前に必ず気付けるようにする。
+  const tierRows = p.customer?.orderTiers ?? [];
+  if (tierRows.length === ORDER_TIER_COUNT) {
+    const active = tierRows.filter((t) => Number(t?.weight) > 0 && Number(t?.count) > 0);
+    const weightSum = tierRows.reduce((acc, t) => acc + (Number(t?.weight) || 0), 0);
+    if (weightSum <= 0) {
+      w.push(
+        "注文数の段階の出現比が全て 0 です。サーバー側で既定（2個/4個/8個・35:35:30）に読み替えられます",
+      );
+    } else if (active.length > 0) {
+      const counts = active.map((t) => Number(t.count));
+      const lightest = Math.min(...counts);
+      if (lightest > 3) {
+        w.push(
+          `実際に出る注文が最も軽いもので ${lightest}個 です。**軽い客が居ないと、遅い人は打ち切れないまま0点で終わります**（実測で実力相関が 0.95 → 0.88 に落ちました）。2個前後の段を必ず1つ残してください`,
+        );
+      }
+      const avg = active.reduce((acc, t) => acc + Number(t.count) * Number(t.weight), 0) /
+        active.reduce((acc, t) => acc + Number(t.weight), 0);
+      if (avg > 6) {
+        w.push(
+          `注文数の平均が ${avg.toFixed(1)}個 と多く、捌ける客数が大きく減ります（既定は4.5個）。終盤は1語が約43打鍵なので、8個で約70秒かかります`,
+        );
+      }
+      if (avg < 2.5) {
+        w.push(
+          `注文数の平均が ${avg.toFixed(1)}個 と少なく、1人あたりの手応えが薄くなります（既定は4.5個）`,
+        );
+      }
+      const heaviest = Math.max(...counts);
+      if (heaviest > 12) {
+        w.push(
+          `最も重い段が ${heaviest}個 です。決勝（100〜120秒）に配られると誰も打ち切れず、その客は誰の得点にもなりません`,
+        );
+      }
+    }
+  }
+
   // --- お題のツマミ（plan-h35 §2）------------------------------------------
   //
   // 🔴 warnMaxIds は**クライアントと合意済みの値**。黙って変えるとクライアント側の

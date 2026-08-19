@@ -24,7 +24,7 @@
 //
 // このファイルは React に依存しない純関数だけを置く（テストしやすさのため）。
 
-import { allBoolPaths, allFieldPaths, allReadonlyPaths, schema, type GameParameters } from "./params";
+import { ATTRIBUTE_KEYS, allBoolPaths, allFieldPaths, allReadonlyPaths, type GameParameters } from "./params";
 
 /** サーバーが GameParameters の外側に足しているキー。ドリフトではない（plan-h23 §3 案B）。 */
 export const NON_PARAM_KEYS = new Set(["configHash"]);
@@ -81,13 +81,8 @@ export function flattenLeaves(obj: unknown, prefix = ""): Map<string, unknown> {
  */
 export function schemaKnownPaths(): Set<string> {
   const s = new Set<string>([...allFieldPaths(), ...allBoolPaths(), ...allReadonlyPaths()]);
-  for (const g of schema) {
-    if (!g.matrix) continue;
-    // 属性行の attribute（"Normal" 等）は編集させないが未知でもない。
-    if (g.key === "customer") {
-      for (const r of g.matrix.rows) s.add(`customer.${r.key}.attribute`);
-    }
-  }
+  // 属性行の attribute（"Normal" 等）は編集させないが未知でもない。
+  for (const a of ATTRIBUTE_KEYS) s.add(`customer.${a.key}.attribute`);
   return s;
 }
 
