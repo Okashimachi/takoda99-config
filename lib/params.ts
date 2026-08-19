@@ -165,10 +165,11 @@ export const defaultParameters: GameParameters = {
       { count: 8, weight: 30 },
     ],
   },
-  // weightMiss は h26(25) → h30(30) → h32後の再測定(22) と3回動いている。
+  // weightMiss は h26(25) → h30(30) → h32後(22) → h36(28) と4回動いている。
+  // 🔴 注文数(customer.orderTiers)を変えると必ず動く。実プレイで配分を決めたら測り直すこと。
   // 🔴 サーバー internal/game/params.go の既定値と必ず一致させること（ズレると
   // DB に無いキーがこちら側の値で保存される。実際 perElapsedSec で起きた）。
-  score: { weightTakoyaki: 100, weightMiss: 22 },
+  score: { weightTakoyaki: 100, weightMiss: 28 },
   sanity: { minMsPerWord: 200 },
   phase: {
     midAliveThreshold: 70,

@@ -126,7 +126,7 @@ test("画面の既定値がサーバー内蔵デフォルトの写しになっ�
     "customer.orderTiers.2.weight": 30,
     // h30: 拮抗点が動いたので 25 → 30
     "score.weightTakoyaki": 100,
-    "score.weightMiss": 22,
+    "score.weightMiss": 28,
     // h32: 難度カーブの主軸。0.11 と書き間違えて本番が 0.11 で走った事故のキー
     "heat.perElapsedSec": 0.12,
     "heat.perAliveDrop": 0.03,
