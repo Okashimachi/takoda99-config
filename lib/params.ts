@@ -9,11 +9,28 @@
 
 export type CustomerAttribute = "Normal" | "Bonus" | "Claimer" | "Buzz";
 
+/**
+ * 1属性ぶんの生成パラメータ。
+ *
+ * 🔴 **h36 で `orderCount` を削除した。** 注文数は属性から切り離され、
+ * `customer.orderTiers` の独立した抽選表になっている（同じ見た目の客に 2個も 8個も出る）。
+ * 本番DBに残る旧キーはサーバー側で未知キーとして無視される。
+ */
 export type AttributeSpec = {
   attribute: CustomerAttribute;
   weight: number;
-  orderCount: number;
 };
+
+/**
+ * 注文数の抽選表の1段（plan-h36）。
+ *
+ * count = たこ焼きの個数（＝その客に配るお題の語数）、weight = 出現の重み。
+ * **属性とは無関係**に引かれる。
+ */
+export type OrderTier = { count: number; weight: number };
+
+/** 注文数の段階数。サーバーは [3]OrderTier の固定長配列で持つ。 */
+export const ORDER_TIER_COUNT = 3;
 
 /** 足切りの1ステージ。atMs は企画で確定しており編集させない（§4.3）。 */
 export type CullStage = { atMs: number; targetAliveCount: number };
@@ -61,6 +78,8 @@ export type GameParameters = {
     bonus: AttributeSpec;
     claimer: AttributeSpec;
     buzz: AttributeSpec;
+    /** 注文数（たこ焼きの個数）の抽選表。**属性とは独立**（plan-h36）。 */
+    orderTiers: OrderTier[];
   };
   score: { weightTakoyaki: number; weightMiss: number };
   sanity: { minMsPerWord: number };
@@ -126,13 +145,25 @@ export const defaultParameters: GameParameters = {
     rankingDeltaIntervalMs: 500,
   },
   matching: { minPlayers: 20, maxPlayers: 99, startCountdownMs: 15000, rosterWaitMs: 3000, readyCountdownMs: 5000, minFill: 99 },
-  // orderCount は h30 で 2/2/1/4 → 3/3/2/6 に引き上げ済み（1語を短くしたぶんを語数で持つ）。
+  // 属性は**出現比だけ**（見た目の彩り）。注文数は orderTiers が独立に決める（plan-h36）。
+  //
+  // 🔴 orderTiers は**本番DBには無いキー**（customer グループは h35 以前のスキーマで存在する）。
+  // つまりこの画面を開いて保存した瞬間、ここの値がそのまま本番へ書き込まれる。
+  // サーバー側 internal/game/params.go の DefaultOrderTiers() から1文字も変えないこと。
+  //
+  // 🔴 **最も軽い段（2個）を消さないこと。** 全段を重くすると「打ち切れないまま終わる」客が
+  // 増え、遅い人が0点のまま終わる（サーバー側の実測で実力相関 0.95 → 0.88）。
   customer: {
     total: 5000,
-    normal: { attribute: "Normal", weight: 70, orderCount: 3 },
-    bonus: { attribute: "Bonus", weight: 15, orderCount: 3 },
-    claimer: { attribute: "Claimer", weight: 10, orderCount: 2 },
-    buzz: { attribute: "Buzz", weight: 5, orderCount: 6 },
+    normal: { attribute: "Normal", weight: 70 },
+    bonus: { attribute: "Bonus", weight: 15 },
+    claimer: { attribute: "Claimer", weight: 10 },
+    buzz: { attribute: "Buzz", weight: 5 },
+    orderTiers: [
+      { count: 2, weight: 35 },
+      { count: 4, weight: 35 },
+      { count: 8, weight: 30 },
+    ],
   },
   // weightMiss は h26(25) → h30(30) → h32後の再測定(22) と3回動いている。
   // 🔴 サーバー internal/game/params.go の既定値と必ず一致させること（ズレると
@@ -321,6 +352,41 @@ export type SubGroup = {
   fields: FieldSpec[];
 };
 
+/**
+ * 行×列の表で見せるまとまり（customer の属性別、cull の段階別、bot の階層別、
+ * customer.orderTiers の注文数段階）。
+ *
+ * ⚠ **1グループに複数の表が載る**（customer は「属性別」と「注文数の段階」の2つ）。
+ * h36 まで `matrix` 単数だったが、注文数を属性から切り離したことで
+ * 「同じ客グループに、意味の違う表が2つ」という形になったため配列にした。
+ */
+export type MatrixSpec = {
+  title: string;
+  desc: string;
+  /** 行見出しの列名（既定「属性」）。表ごとに行が何を指すかが違う。 */
+  rowHeader?: string;
+  rows: { key: string; label: string; note: string }[];
+  cols: {
+    key: string;
+    label: string;
+    unit?: string;
+    help: string;
+    /**
+     * true=小数可（既定は整数）。bot.tiers の missRate / heatPenalty がこれ。
+     * 付け忘れると検証が「整数で入力してください」を出して**そのマスが編集できなくなる**。
+     */
+    float?: boolean;
+    /**
+     * true=表示のみ（編集させない）。
+     * cull.stages の atMs がこれ。20秒等間隔・120秒は企画で確定しており、
+     * 当日いじると試合が壊れる（plan-h24 §4.3）。
+     */
+    readonly?: boolean;
+  }[];
+  /** 行×列 → パス。 */
+  pathOf: (row: string, col: string) => string;
+};
+
 export type GroupSpec = {
   key: keyof GameParameters;
   title: string;
@@ -331,35 +397,14 @@ export type GroupSpec = {
   timing: "live" | "next-match" | "presentation";
   fields?: FieldSpec[];
   subgroups?: SubGroup[];
-  /** 属性別の値を表で見せるグループ（customer）用。 */
-  matrix?: {
-    title: string;
-    desc: string;
-    rows: { key: string; label: string; note: string }[];
-    cols: {
-      key: string;
-      label: string;
-      unit?: string;
-      help: string;
-      /**
-       * true=小数可（既定は整数）。bot.tiers の missRate / heatPenalty がこれ。
-       * 付け忘れると検証が「整数で入力してください」を出して**そのマスが編集できなくなる**。
-       */
-      float?: boolean;
-      /**
-       * true=表示のみ（編集させない）。
-       * cull.stages の atMs がこれ。20秒等間隔・120秒は企画で確定しており、
-       * 当日いじると試合が壊れる（plan-h24 §4.3）。
-       */
-      readonly?: boolean;
-    }[];
-    /** 行×列 → パス。 */
-    pathOf: (row: string, col: string) => string;
-  };
+  /** 行×列の表。1グループに複数載る（customer は属性別＋注文数の2つ）。 */
+  matrices?: MatrixSpec[];
 };
 
 // ⚠ 本戦では**属性はゲームに一切影響しない**（見た目の出し分け専用）。
-// 変えられるのは出現比と注文数だけで、同じ打鍵をすれば属性によらず同じスコアになる。
+// 変えられるのは出現比だけで、同じ打鍵をすれば属性によらず同じスコアになる。
+// 🔴 **注文数も h36 で属性から切り離された**（customer.orderTiers）。
+// 「この属性は重い注文が出やすい」は存在しないので、行の説明にそう書かないこと。
 export const ATTRIBUTE_KEYS: {
   key: "normal" | "bonus" | "claimer" | "buzz";
   value: CustomerAttribute;
@@ -368,8 +413,8 @@ export const ATTRIBUTE_KEYS: {
 }[] = [
   { key: "normal", value: "Normal", label: "通常客", note: "母数を作る標準の客" },
   { key: "bonus", value: "Bonus", label: "ボーナス客", note: "ヒョウ柄おばちゃん。見た目だけの違い" },
-  { key: "claimer", value: "Claimer", label: "クレーマー", note: "序盤は来店しない。注文は少なめ" },
-  { key: "buzz", value: "Buzz", label: "バズ客（JK）", note: "注文数が多い＝1人でたこ焼きを稼げる" },
+  { key: "claimer", value: "Claimer", label: "クレーマー", note: "序盤は来店しない。見た目だけの違い" },
+  { key: "buzz", value: "Buzz", label: "バズ客（JK）", note: "見た目だけの違い。⚠ h36 で注文数は属性から切り離された（JK でも2個の客が出る）" },
 ];
 
 /** CULL_ROWS は足切り表の行（6ステージ）。 */
@@ -416,9 +461,10 @@ export const schema: GroupSpec[] = [
         help: "「次の足切りで切られる店」としてクライアントへ送るIDの最大件数（危ない順）。🔴 既定24は**クライアントと合意済みの値**（初回の足切り99→75でちょうど24店が切られるため、最も人数が多い段階でも全員を出し切れる）。当日に勝手に変えず、変えるときは必ずクライアント担当に共有すること。下げれば送信量が減る（会場の回線が厳しい時の逃げ道）、上げればデバッグ時に全件見える。0 にするとサーバー側で既定24として扱われる（＝「1件も送らない」にはできない）。",
       },
     ],
-    matrix: {
+    matrices: [{
       title: "6段階のスケジュール",
       desc: "時刻は企画で確定しており変更できない（20秒等間隔・120秒で終了）。動かしてよいのは第2〜第4段階の目標生存数だけ。",
+      rowHeader: "段階",
       rows: CULL_ROWS,
       cols: [
         {
@@ -436,7 +482,7 @@ export const schema: GroupSpec[] = [
         },
       ],
       pathOf: (row, col) => `cull.stages.${row}.${col}`,
-    },
+    }],
   },
   {
     key: "matching",
@@ -487,7 +533,7 @@ export const schema: GroupSpec[] = [
     key: "customer",
     title: "客",
     icon: "🧑‍🤝‍🧑",
-    desc: "試合全体で流れる客の総数と、属性ごとの出現比・注文数。⚠ 本戦では属性はスコアに影響しない（見た目の出し分けのみ）。",
+    desc: "試合全体で流れる客の総数・属性ごとの出現比・注文数の抽選表。⚠ 本戦では属性はスコアに影響しない（見た目の出し分けのみ）。**注文数も属性とは無関係**に抽選される（h36）。",
     timing: "next-match",
     fields: [
       {
@@ -497,25 +543,53 @@ export const schema: GroupSpec[] = [
         help: "1試合で登場する客の固定総数。全店で奪い合う。少なすぎると客が枯れて、行列が空＝お題が途切れる店が出る。",
       },
     ],
-    matrix: {
-      title: "属性別の設定",
-      desc: "出現比は相対値（合計で割った比率）。注文数は1人が出すお題の本数＝たこ焼きの個数で、スコアの加点対象。",
-      rows: ATTRIBUTE_KEYS.map((a) => ({ key: a.key, label: a.label, note: a.note })),
-      cols: [
-        {
-          key: "weight",
-          label: "出現比",
-          help: "この属性が抽選で選ばれる相対的な重み。他の属性との比率だけが意味を持つ（合計が100である必要はない）。",
-        },
-        {
-          key: "orderCount",
-          label: "注文数",
-          unit: "本",
-          help: "この客1人が出すお題の本数＝たこ焼きの個数。スコアはこの数に weightTakoyaki を掛けて加算する。多いほど1人あたりの旨みが大きい。",
-        },
-      ],
-      pathOf: (row, col) => `customer.${row}.${col}`,
-    },
+    matrices: [
+      {
+        title: "属性別の出現比（見た目）",
+        desc:
+          "出現比は相対値（合計で割った比率）。⚠ 属性が決めるのは**キャラの見た目だけ**で、" +
+          "注文数もスコアも属性では変わらない（h36 で注文数を切り離した）。",
+        rowHeader: "属性",
+        rows: ATTRIBUTE_KEYS.map((a) => ({ key: a.key, label: a.label, note: a.note })),
+        cols: [
+          {
+            key: "weight",
+            label: "出現比",
+            help: "この属性が抽選で選ばれる相対的な重み。他の属性との比率だけが意味を持つ（合計が100である必要はない）。0 にするとその見た目の客は出てこない。",
+          },
+        ],
+        pathOf: (row, col) => `customer.${row}.${col}`,
+      },
+      {
+        title: "注文数の段階（たこ焼きの個数）",
+        desc:
+          "★当日いちばん体感に効く表。1人の客が注文するたこ焼きの個数を、属性とは独立に3段階から抽選する" +
+          "（同じ見た目の客に 2個も 8個も出る）。既定は 2個/4個/8個 を 35:35:30＝平均4.5個。" +
+          "🔴 **いちばん軽い段（2個）を消さないこと。** 全段を重くすると「打ち切れないまま試合が終わる」客が増え、" +
+          "遅い人がずっと打っているのに0点で終わる（実測で実力相関 0.95 → 0.88 に落ちた）。" +
+          "重すぎると感じたら、軽い段を消すのではなく**重い段の出現比を下げる**こと。",
+        rowHeader: "段階",
+        rows: [
+          { key: "0", label: "軽い", note: "🔴 **必ず達成できる客**。遅い人が0点で終わらないための担保。消さない" },
+          { key: "1", label: "標準", note: "母数。ここが「普通の注文」の体感を決める" },
+          { key: "2", label: "重い", note: "打ち切れると大きい。増やしすぎると終盤に打ち切れない客が増える" },
+        ],
+        cols: [
+          {
+            key: "count",
+            label: "個数",
+            unit: "個",
+            help: "この段の客1人が注文するたこ焼きの個数＝出るお題の語数。スコアはこの数に「たこ焼き1個の加点」を掛けて加算する。⚠ 客ひとりぶんを**全部打ち切って初めて加点**されるので、大きくすると「打ち切れず0点」が増える（終盤は1語約43打鍵なので8個＝約70秒）。0 にするとサーバー側で既定へ読み替えられる（＝段を消すことはできない。出したくない段は出現比を0にする）。",
+          },
+          {
+            key: "weight",
+            label: "出現比",
+            help: "この段が抽選で選ばれる相対的な重み。他の段との比率だけが意味を持つ（合計が100である必要はない）。0 にするとその段は出てこない。🔴 軽い段を 0 にしないこと。",
+          },
+        ],
+        pathOf: (row, col) => `customer.orderTiers.${row}.${col}`,
+      },
+    ],
   },
   {
     key: "phase",
@@ -653,8 +727,9 @@ export const schema: GroupSpec[] = [
         help: "お題1本ごとに所要時間へ乗せる揺らぎの幅（±ms）。上の「個体差」とは別物で、こちらは毎回振り直す。0 でも個体差は残る。",
       },
     ],
-    matrix: {
+    matrices: [{
       title: "強さの階層（強／中／弱）",
+      rowHeader: "階層",
       desc:
         "「人間が上位を独占する」なら1打鍵の時間を3行とも下げ、「人間が20秒で全滅する」なら3行とも上げる。" +
         "特定の階層だけが上位を占めているときは、その行の出現比を下げるほうが効く。",
@@ -689,7 +764,7 @@ export const schema: GroupSpec[] = [
         },
       ],
       pathOf: (row, col) => `bot.tiers.${row}.${col}`,
-    },
+    }],
   },
   {
     key: "presentation",
@@ -795,10 +870,10 @@ export function allFieldPaths(): string[] {
   for (const g of schema) {
     for (const f of g.fields ?? []) if (!f.bool) out.push(f.path);
     for (const sg of g.subgroups ?? []) for (const f of sg.fields) if (!f.bool) out.push(f.path);
-    if (g.matrix) {
-      for (const r of g.matrix.rows) {
-        for (const c of g.matrix.cols) {
-          if (!c.readonly) out.push(g.matrix.pathOf(r.key, c.key));
+    for (const mx of g.matrices ?? []) {
+      for (const r of mx.rows) {
+        for (const c of mx.cols) {
+          if (!c.readonly) out.push(mx.pathOf(r.key, c.key));
         }
       }
     }
@@ -820,10 +895,11 @@ export function allBoolPaths(): string[] {
 export function allReadonlyPaths(): string[] {
   const out: string[] = [];
   for (const g of schema) {
-    if (!g.matrix) continue;
-    for (const r of g.matrix.rows) {
-      for (const c of g.matrix.cols) {
-        if (c.readonly) out.push(g.matrix.pathOf(r.key, c.key));
+    for (const mx of g.matrices ?? []) {
+      for (const r of mx.rows) {
+        for (const c of mx.cols) {
+          if (c.readonly) out.push(mx.pathOf(r.key, c.key));
+        }
       }
     }
   }
@@ -857,10 +933,10 @@ export function allFieldSpecs(): Map<
         });
       }
     }
-    if (g.matrix) {
-      for (const r of g.matrix.rows) {
-        for (const c of g.matrix.cols) {
-          m.set(g.matrix.pathOf(r.key, c.key), {
+    for (const mx of g.matrices ?? []) {
+      for (const r of mx.rows) {
+        for (const c of mx.cols) {
+          m.set(mx.pathOf(r.key, c.key), {
             label: `${r.label} / ${c.label}`,
             group: g.title,
             unit: c.unit,

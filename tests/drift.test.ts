@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { detectDrift, editableUnknown, exportFileName, flattenLeaves, parseImported } from "../lib/drift";
-import { applyEdits, defaultParameters, getPath, type EditValue } from "../lib/params";
+import { allFieldPaths, applyEdits, defaultParameters, fillMissing, getPath, type EditValue } from "../lib/params";
 import { riskWarnings, validate } from "../lib/validate";
 
 /** サーバーが返す JSON を模す（configHash 込み・GameParameters の完全な写し）。 */
@@ -110,12 +110,20 @@ test("applyEdits は未知フィールドを保存で落とさない（設計の
 // 「画面の好みの値」を置いてはいけない。
 test("画面の既定値がサーバー内蔵デフォルトの写しになっている", () => {
   const expected: Record<string, number | boolean> = {
-    // h30: 1語を短くしたぶん語数で難度を持つ
-    "customer.normal.orderCount": 3,
-    "customer.bonus.orderCount": 3,
-    "customer.claimer.orderCount": 2,
-    "customer.buzz.orderCount": 6,
     "customer.total": 5000,
+    "customer.normal.weight": 70,
+    "customer.bonus.weight": 15,
+    "customer.claimer.weight": 10,
+    "customer.buzz.weight": 5,
+    // h36: 注文数は属性から切り離した独立の抽選表。🔴 **本番DBに無いキー**なので、
+    // ここがサーバーとズレていると画面を開いて保存した瞬間にズレた値が本番へ入る
+    // （2026-08-16 の heat.perElapsedSec とまったく同じ経路）。
+    "customer.orderTiers.0.count": 2,
+    "customer.orderTiers.0.weight": 35,
+    "customer.orderTiers.1.count": 4,
+    "customer.orderTiers.1.weight": 35,
+    "customer.orderTiers.2.count": 8,
+    "customer.orderTiers.2.weight": 30,
     // h30: 拮抗点が動いたので 25 → 30
     "score.weightTakoyaki": 100,
     "score.weightMiss": 22,
@@ -270,4 +278,95 @@ test("Bot が全階層とも人間より速い／遅い設定は保存前に警�
     riskWarnings(defaultParameters).filter((m) => m.includes("Bot")),
     [],
   );
+});
+
+// ── 注文数の段階（plan-h36）───────────────────────────────────────
+
+// 🔴 サーバーは 0 を「未設定」として既定へ読み替えるので、**画面側も 0 を弾いてはいけない**。
+// 弾く設計にすると「サーバーでも弾く」に揃えたくなり、本番DBに orderTiers が無い状態で
+// Load が落ちて設定が丸ごと内蔵デフォルトへ巻き戻る（#124 と同じ経路）。
+test("customer.orderTiers はゼロを許し、負値を弾く", () => {
+  const p = structuredClone(defaultParameters);
+  p.customer.orderTiers[2] = { count: 0, weight: 0 };
+  assert.deepEqual(validate(p), [], "ゼロは「未設定」なので保存できるべき");
+
+  const q = structuredClone(defaultParameters);
+  q.customer.orderTiers[0].count = -1;
+  assert.ok(validate(q).length > 0, "負値は弾く");
+});
+
+test("customer.orderTiers の段階数が 3 でないと弾く（ゼロ埋めの罠の入口）", () => {
+  const p = structuredClone(defaultParameters);
+  p.customer.orderTiers.pop();
+  assert.ok(validate(p).length > 0);
+});
+
+// 🔴 h36 で守るべき制約はこれ1つ。全段を重くすると「打ち切れないまま終わる」客が増え、
+// 遅い人が0点のまま終わる（サーバー側の実測で実力相関 0.95 → 0.88）。
+test("軽い段を消した注文数は保存前に警告する", () => {
+  const heavy = structuredClone(defaultParameters);
+  heavy.customer.orderTiers = [
+    { count: 4, weight: 35 },
+    { count: 6, weight: 35 },
+    { count: 8, weight: 30 },
+  ];
+  assert.ok(
+    riskWarnings(heavy).some((m) => m.includes("0点")),
+    `軽い段が無い警告が出ていない: ${JSON.stringify(riskWarnings(heavy))}`,
+  );
+
+  // 出現比 0 で軽い段を「実質消す」のも同じ事故なので、同じ警告に落ちること。
+  const disabled = structuredClone(defaultParameters);
+  disabled.customer.orderTiers[0].weight = 0;
+  assert.ok(
+    riskWarnings(disabled).some((m) => m.includes("0点")),
+    `出現比0で軽い段を消しても警告が出ていない: ${JSON.stringify(riskWarnings(disabled))}`,
+  );
+
+  // 既定値では余計な警告を出さない（当日ダイアログがうるさくならないこと）。
+  assert.deepEqual(
+    riskWarnings(defaultParameters).filter((m) => m.includes("注文")),
+    [],
+  );
+});
+
+// h36 で廃止したキー。スキーマに残っていると「効かないツマミ」を当日いじることになる。
+test("customer.*.orderCount はスキーマから消えている", () => {
+  for (const attr of ["normal", "bonus", "claimer", "buzz"]) {
+    assert.equal(
+      allFieldPaths().includes(`customer.${attr}.orderCount`),
+      false,
+      `customer.${attr}.orderCount が編集可能なまま残っている（h36 で廃止）`,
+    );
+  }
+  // 本番DBに残った旧キーは「未知リーフ」として見えるだけで、保存しても落ちない。
+  const raw = serverJson();
+  (raw.customer as Record<string, unknown>).normal = { attribute: "Normal", weight: 70, orderCount: 3 };
+  const d = detectDrift(raw);
+  assert.deepEqual(
+    d.unknown.map((u) => u.path),
+    ["customer.normal.orderCount"],
+  );
+});
+
+// 本番DB相当（customer グループはあるが orderTiers が無い）を読んでも画面が壊れないこと。
+// 🔴 補完に失敗して undefined のまま描くと入力欄が空になり、当日「注文数が触れない」になる。
+test("orderTiers を返さないサーバー応答でも画面側で既定に補完される", () => {
+  const raw = serverJson();
+  delete (raw.customer as Record<string, unknown>).orderTiers;
+
+  // まずドリフト検出が「効かないツマミ」として拾うこと（気付ける導線）。
+  const d = detectDrift(raw);
+  assert.deepEqual(d.missing, [
+    "customer.orderTiers.0.count",
+    "customer.orderTiers.0.weight",
+    "customer.orderTiers.1.count",
+    "customer.orderTiers.1.weight",
+    "customer.orderTiers.2.count",
+    "customer.orderTiers.2.weight",
+  ]);
+
+  const filled = fillMissing(raw);
+  assert.deepEqual(filled.customer.orderTiers, defaultParameters.customer.orderTiers);
+  assert.deepEqual(validate(filled), []);
 });

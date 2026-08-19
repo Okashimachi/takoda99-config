@@ -303,10 +303,12 @@ export default function ParamsPage() {
     return schema.filter((g) => {
       const inFields = (g.fields ?? []).some(matches);
       const inSubs = (g.subgroups ?? []).some((sg) => sg.fields.some(matches));
-      const inMatrix =
-        !!g.matrix &&
-        (g.title.toLowerCase().includes(q) ||
-          g.matrix.cols.some((c) => c.label.toLowerCase().includes(q) || c.help.toLowerCase().includes(q)));
+      const inMatrix = (g.matrices ?? []).some(
+        (mx) =>
+          g.title.toLowerCase().includes(q) ||
+          mx.title.toLowerCase().includes(q) ||
+          mx.cols.some((c) => c.label.toLowerCase().includes(q) || c.help.toLowerCase().includes(q)),
+      );
       return inFields || inSubs || inMatrix || g.title.toLowerCase().includes(q);
     });
   }, [q, matches]);
@@ -429,23 +431,23 @@ export default function ParamsPage() {
                   </div>
                 ) : null}
 
-                {/* 属性マトリクス（customer） */}
-                {g.matrix && (!q || g.matrix.rows.length > 0) ? (
-                  <div className="mt-5">
+                {/* 行×列の表（customer は「属性別」と「注文数の段階」の2つ・h36） */}
+                {(g.matrices ?? []).map((mx) => (
+                  <div key={mx.title} className="mt-5">
                     <h3 className="text-[13px] font-semibold text-stone-700 dark:text-stone-200">
-                      {g.matrix.title}
+                      {mx.title}
                     </h3>
                     <p className="mb-2 text-[11px] leading-relaxed text-stone-500 dark:text-stone-400">
-                      {g.matrix.desc}
+                      {mx.desc}
                     </p>
                     <div className="overflow-x-auto">
                       <table className="w-full min-w-[34rem] border-separate border-spacing-0 text-sm">
                         <thead>
                           <tr>
                             <th className="sticky left-0 z-10 bg-white py-1.5 pr-3 text-left text-[11px] font-medium text-stone-500 dark:bg-stone-900">
-                              属性
+                              {mx.rowHeader ?? "属性"}
                             </th>
-                            {g.matrix.cols.map((c) => (
+                            {mx.cols.map((c) => (
                               <th
                                 key={c.key}
                                 title={c.help}
@@ -458,7 +460,7 @@ export default function ParamsPage() {
                           </tr>
                         </thead>
                         <tbody>
-                          {g.matrix.rows.map((r) => (
+                          {mx.rows.map((r) => (
                             <tr key={r.key} className="align-top">
                               <td className="sticky left-0 z-10 bg-white py-1.5 pr-3 dark:bg-stone-900">
                                 <div className="text-[13px] font-medium text-stone-700 dark:text-stone-200">
@@ -468,8 +470,8 @@ export default function ParamsPage() {
                                   <div className="text-[11px] text-stone-500 dark:text-stone-400">{r.note}</div>
                                 ) : null}
                               </td>
-                              {g.matrix!.cols.map((c) => {
-                                const path = g.matrix!.pathOf(r.key, c.key);
+                              {mx.cols.map((c) => {
+                                const path = mx.pathOf(r.key, c.key);
                                 const changed = changedPaths.has(path);
                                 const invalid = errorPaths.has(path);
                                 const v = getNumber(current, path);
@@ -522,7 +524,7 @@ export default function ParamsPage() {
                       </table>
                     </div>
                   </div>
-                ) : null}
+                ))}
 
                 {/* サブグループ（credit.leaveLoss） */}
                 {(g.subgroups ?? []).map((sg) =>
